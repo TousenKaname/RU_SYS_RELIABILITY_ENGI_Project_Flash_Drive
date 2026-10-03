@@ -45,7 +45,9 @@ stops cleanly on Ctrl+C (the cycle in progress is discarded and repeated on rest
 3. **Write** (host → drive): each file is generated in memory and flushed with `fsync`
    (`F_FULLFSYNC` on macOS). No source file ever touches the host disk.
 4. **Read back** (drive → host) bypassing the page cache (`FILE_FLAG_NO_BUFFERING` on
-   Windows, `F_NOCACHE` on macOS, `posix_fadvise` on Linux) and compare byte for byte with
+   Windows; `msync(MS_INVALIDATE)` plus `F_NOCACHE` on macOS; `posix_fadvise` on Linux).
+   On macOS and Linux the block reads of every read-back are counted, so a read-back
+   served from memory is flagged in the log. Each file is compared byte for byte with
    the regenerated reference. Every 1 MiB chunk carries a 32-byte header (file key,
    cycle, file and chunk number), so a bad chunk is classified as bit errors, stale data,
    misdirected data, an erased page, garbled or truncated.
@@ -61,7 +63,7 @@ re-enumerate, checks for a read-only lock and runs a 64 MiB recovery check.
 | F2 | unrecoverable I/O error | F6 | file-system fault (space, capacity) |
 | F3 | disconnect, or no I/O progress for 10 min (hang) | D1 | write throughput < 50 % of baseline |
 | F4 | read-only lock | D2 | intermittent failure (works after reset) |
-|    |  | D3 | transient error cleared by a retry |
+| | | D3 | transient error cleared by a retry |
 
 A drive's life ends (hard failure) when it does not pass the recovery protocol, locks
 read-only, changes capacity, or has 3 cycle failures within 10 cycles. See
@@ -69,7 +71,7 @@ read-only, changes capacity, or has 3 cycle failures within 10 cycles. See
 
 ## Repository layout
 
-```
+```text
 configs/            inventory.yaml (drives), phase1.yaml (campaign), probes.example.yaml
 src/flashrel/       the package
   config.py         campaign YAML -> validated dataclasses
@@ -89,12 +91,14 @@ src/flashrel/       the package
 scripts/            make_plan_figures.py, make_plan_tables.py, planning_assumptions.py
 hardware/arduino/   DS18B20 temperature logger sketch
 docs/               operator guide
-tests/              51 tests, including end-to-end cycles with injected faults
+tests/              68 tests, including end-to-end cycles with injected faults
 ```
 
 Each drive's logs live in `<data_dir>/<campaign>/<drive>/`: `cycles.csv` (one row per
-cycle, 35 fields), `events.jsonl`, `state.json` (resume point) and `intake.json`. Point
-`data_dir` in the campaign file at a synced folder so both hosts write to one place.
+cycle, 36 fields), `events.jsonl`, `state.json` (resume point) and `intake.json`. The
+logs are the record of truth: a restarted worker reconciles `state.json` with them, so
+no cycle is counted twice. Point `data_dir` in the campaign file at a synced folder so
+both hosts write to one place.
 
 ## Figures and tables of the test plan
 

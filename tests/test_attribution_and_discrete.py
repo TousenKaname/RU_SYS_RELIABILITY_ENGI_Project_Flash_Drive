@@ -34,8 +34,25 @@ def test_cloglog_recovers_workload_hazard_ratio():
             failed = rng.random() < 1 - np.exp(-np.exp(eta))
             rows.append({"drive_id": drive, "cycle": k, "workload": workload,
                          "outcome": "corruption" if failed else "pass"})
-    x, y, names = per_cycle_design(pd.DataFrame(rows))
-    fit = fit_cloglog(x, y, names)
+    x, y, names, clusters = per_cycle_design(pd.DataFrame(rows))
+    fit = fit_cloglog(x, y, names, clusters=clusters)
     table = fit.table().set_index("term")
+    assert fit.robust and set(table["se_type"]) == {"cluster-robust"}
     assert table.loc["workload[small]", "hazard_ratio"] == pytest.approx(3.0, rel=0.35)
     assert table.loc["workload[large]", "hazard_ratio"] == pytest.approx(1.0, abs=0.45)
+
+
+def test_missing_reference_workload_falls_back():
+    rows = [{"drive_id": d, "cycle": k, "workload": ("small", "large")[k % 2],
+             "outcome": "corruption" if (d + k) % 37 == 0 else "pass"}
+            for d in range(6) for k in range(1, 200)]
+    x, y, names, clusters = per_cycle_design(pd.DataFrame(rows), reference_workload="medium")
+    assert np.linalg.matrix_rank(x) == x.shape[1]
+    assert [n for n in names if n.startswith("workload")] == ["workload[small]"]
+
+
+def test_port_faults_are_not_trials():
+    rows = [{"drive_id": 1, "cycle": k, "workload": "medium",
+             "outcome": "port_fault" if k == 5 else "pass"} for k in range(1, 11)]
+    x, y, names, clusters = per_cycle_design(pd.DataFrame(rows))
+    assert len(y) == 9 and y.sum() == 0

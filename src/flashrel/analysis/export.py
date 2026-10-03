@@ -49,9 +49,13 @@ def write_workbook(campaign: Campaign, path: Path) -> Path:
         life.to_excel(xl, sheet_name="LifeTable", index=False)
         if not cycles.empty:
             ok = cycles[cycles["outcome"] == "pass"]
+
+            def drive_failures(outcomes: pd.Series) -> int:
+                return int((~outcomes.isin(["pass", "aborted", "port_fault"])).sum())
+
             (cycles.groupby(["group", "brand", "capacity_gb"])
                    .agg(drives=("drive_id", "nunique"), cycles=("cycle", "size"),
-                        failed_cycles=("outcome", lambda s: int((s != "pass").sum())),
+                        failed_cycles=("outcome", drive_failures),
                         tb_written=("write_bytes", lambda s: s.sum() / 1e12))
                    .reset_index().to_excel(xl, sheet_name="ByGroup", index=False))
             (ok.groupby(["group", "workload"])

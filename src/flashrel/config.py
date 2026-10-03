@@ -146,12 +146,17 @@ def _section(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
 
 
 def _end_time(value: Any) -> datetime | None:
-    if value is None or isinstance(value, datetime):
-        return value
-    try:
-        return datetime.fromisoformat(str(value))
-    except ValueError:
-        raise ConfigError(f"stop.end_time is not an ISO date-time: {value!r}") from None
+    """Stop time as a naive local date-time (the harness compares with local time)."""
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        try:
+            value = datetime.fromisoformat(str(value))
+        except ValueError:
+            raise ConfigError(f"stop.end_time is not an ISO date-time: {value!r}") from None
+    if value.tzinfo is not None:  # e.g. "2026-12-01T14:00:00Z" -> local wall-clock time
+        value = value.astimezone().replace(tzinfo=None)
+    return value
 
 
 def load_campaign(path: str | Path) -> Campaign:

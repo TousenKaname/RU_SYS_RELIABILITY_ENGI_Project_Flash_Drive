@@ -33,15 +33,29 @@ def _covariates(campaign: Campaign, drive_id: str) -> dict:
             "capacity_gb": unit.capacity_gb, "housing": unit.group.housing}
 
 
+def _port_faulted(log: DriveLog) -> set[int]:
+    return {int(e.detail.get("failure_cycle", -1)) for e in log.read_events()
+            if e.type is EventType.PORT_FAULT}
+
+
 def cycles_frame(campaign: Campaign) -> pd.DataFrame:
-    """All cycle rows of the campaign with numeric columns and drive covariates."""
+    """All cycle rows of the campaign with numeric columns and drive covariates.
+
+    Cycles whose failure was re-attributed to a port get ``outcome == "port_fault"``,
+    so no analysis counts them as drive failures.
+    """
     frames = []
     for drive_id in drive_ids(campaign.run_dir):
         if drive_id not in campaign.inventory:
             continue
-        rows = DriveLog(campaign.run_dir, drive_id).read_cycles()
+        log = DriveLog(campaign.run_dir, drive_id)
+        rows = log.read_cycles()
         if rows:
             frame = pd.DataFrame(rows).assign(**_covariates(campaign, drive_id))
+            faulted = _port_faulted(log)
+            if faulted:
+                hit = frame["cycle"].astype(int).isin(faulted) & (frame["outcome"] != "pass")
+                frame.loc[hit, "outcome"] = "port_fault"
             frames.append(frame)
     if not frames:
         return pd.DataFrame()
@@ -65,30 +79,30 @@ def events_frame(campaign: Campaign) -> pd.DataFrame:
 
 def _drive_failures(log: DriveLog) -> tuple[list[int], int | None, str]:
     """(drive-attributed cycle-failure cycles, hard-failure cycle, hard-failure code)."""
-    events = log.read_events()
-    port_caused = {int(e.detail.get("failure_cycle", -1)) for e in events
-                   if e.type is EventType.PORT_FAULT}
-    failures = sorted(e.cycle for e in events
-                      if e.type is EventType.CYCLE_FAILURE and e.cycle not in port_caused)
-    hard = [(e.cycle, e.code) for e in events if e.type is EventType.HARD_FAILURE]
-    return failures, (hard[0][0] if hard else None), (hard[0][1] if hard else "")
+    hard = [(e.cycle, e.code) for e in log.read_events() if e.type is EventType.HARD_FAILURE]
+    return log.failure_cycles(), (hard[0][0] if hard else None), (hard[0][1] if hard else "")
 
 
 def life_table(campaign: Campaign) -> pd.DataFrame:
-    """One row per drive: failure times, censoring flags and covariates."""
+    """One row per drive: failure times, censoring flags and covariates.
+
+    The first-failure endpoint includes the hard failure itself, so a drive
+    whose first trouble was its terminal failure is not counted as surviving.
+    """
     rows = []
     for drive_id in campaign.assignments:
         log = DriveLog(campaign.run_dir, drive_id)
-        state = log.load_state()
+        state = log.reconcile(log.load_state())
         failures, hard, code = _drive_failures(log)
-        observed = state.cycles_done
+        firsts = failures + ([hard] if hard is not None else [])
+        observed = max([state.cycles_done, *firsts])
         rows.append({
             "drive_id": drive_id,
             **_covariates(campaign, drive_id),
             "cycles": observed,
             "bytes_written": state.bytes_written,
-            "t_first": failures[0] if failures else observed,
-            "first_failed": bool(failures),
+            "t_first": min(firsts) if firsts else observed,
+            "first_failed": bool(firsts),
             "t_hard": hard if hard is not None else observed,
             "hard_failed": hard is not None,
             "hard_code": code,
@@ -104,6 +118,7 @@ def recurrent_units(campaign: Campaign) -> dict[str, list[tuple[list[int], int]]
     for drive_id in campaign.assignments:
         log = DriveLog(campaign.run_dir, drive_id)
         failures, _, _ = _drive_failures(log)
+        end = max([log.load_state().cycles_done, *failures])
         group = campaign.inventory[drive_id].group.code
-        units.setdefault(group, []).append((failures, log.load_state().cycles_done))
+        units.setdefault(group, []).append((failures, end))
     return units

@@ -16,7 +16,9 @@ repository root as the working directory and `configs/phase1.yaml` as the campai
 
 Use the docks' power adapters if they have one. Keep at least 1 cm between drives.
 Label the hub ports W1–W3, A1–A3 (dock A), B1–B3 (dock B); W4 (front panel of host W)
-is the spare port. Run `flashrel selftest` on every host; all three checks must say `ok`.
+is the spare port. Run `flashrel selftest` on every host; all four checks must say `ok`.
+On the MacBook the second check counts the block reads of the read-back; if it fails,
+the read-back came from memory and that host must not run the test.
 
 ## 2. Intake (once per drive)
 
@@ -62,7 +64,10 @@ Never unplug a drive during a cycle except as part of this protocol.
 ## 5. A drive needs attention
 
 1. Move the drive to the spare port W4 and run
-   `flashrel recheck configs/phase1.yaml --drive A8-03 --port W4`.
+   `flashrel recheck configs/phase1.yaml --drive A8-03 --port W4`
+   (add `--host W` when the drive came from host M, so host M's supervisor leaves it alone).
+   `recheck` only works on a drive in the attention state and refuses while a worker
+   holds the drive.
 2. **Passes on W4**: plug the reference drive into the old port and run
    `flashrel portcheck configs/phase1.yaml --port A2 --mount <REF>`.
    - Reference fails → the port is faulty:

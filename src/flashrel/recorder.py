@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from flashrel.cycle import CycleResult
-from flashrel.failure import DriveState, Event, utc_now
+from flashrel.failure import DriveState, Event, EventType, utc_now
 
 CYCLE_FIELDS = (
     "drive_id", "cycle", "workload", "host", "port", "started_at", "ended_at", "duration_s",
@@ -34,7 +35,7 @@ CYCLE_FIELDS = (
     "write_lat_max_s", "verify_bytes", "verify_s", "verify_mbps", "verify_lat_p95_s",
     "delete_s", "files_missing", "files_corrupt", "files_unreadable", "bytes_corrupt",
     "bits_corrupt", "corruption_kinds", "transient_errors", "unrecovered_errors",
-    "leftover_dirs", "space_leak", "cache_bypassed",
+    "leftover_dirs", "space_leak", "cache_bypassed", "verify_device_reads",
 )
 TEMPERATURE_FIELDS = ("time", "host", "probe", "celsius")
 
@@ -66,11 +67,24 @@ def cycle_row(r: CycleResult) -> dict[str, Any]:
         "unrecovered_errors": sum(1 for e in r.errors if not e.recovered),
         "leftover_dirs": r.leftover_dirs, "space_leak": r.space_leak,
         "cache_bypassed": int(r.cache_bypassed),
+        "verify_device_reads": "" if r.verify_device_reads is None else r.verify_device_reads,
     }
+
+
+def _needs_newline(path: Path) -> bool:
+    """True when the file's last record was torn (no final newline), e.g. by a power cut."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:  # missing or empty file
+        return False
 
 
 def _append(path: Path, text: str) -> None:
     with open(path, "a", encoding="utf-8", newline="") as fh:
+        if _needs_newline(path):
+            fh.write("\n")  # isolate a torn line instead of joining it to this record
         fh.write(text)
         fh.flush()
         os.fsync(fh.fileno())
@@ -78,7 +92,10 @@ def _append(path: Path, text: str) -> None:
 
 def _append_csv(path: Path, fields: tuple[str, ...], row: dict[str, Any]) -> None:
     new = not path.exists() or path.stat().st_size == 0
+    torn = not new and _needs_newline(path)
     with open(path, "a", encoding="utf-8", newline="") as fh:
+        if torn:
+            fh.write("\r\n")
         writer = csv.DictWriter(fh, fieldnames=fields)
         if new:
             writer.writeheader()
@@ -87,13 +104,25 @@ def _append_csv(path: Path, fields: tuple[str, ...], row: dict[str, Any]) -> Non
         os.fsync(fh.fileno())
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def _write_atomic(path: Path, text: str, attempts: int = 40) -> None:
+    """Write via a temp file and rename; retry while another process holds the target.
+
+    On Windows a sync client, an antivirus scanner or a concurrent reader can
+    keep the file open for a moment, which makes ``os.replace`` fail.
+    """
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.25)
 
 
 class DriveLog:
@@ -133,16 +162,56 @@ class DriveLog:
         return path
 
     def read_cycles(self) -> list[dict[str, str]]:
+        """Cycle rows; a row torn by a power cut (wrong field count) is skipped."""
         if not self.cycles_path.exists():
             return []
         with open(self.cycles_path, encoding="utf-8", newline="") as fh:
-            return list(csv.DictReader(fh))
+            rows = list(csv.DictReader(fh))
+        return [r for r in rows if None not in r and None not in r.values()
+                and str(r.get("cycle", "")).isdigit()]
 
     def read_events(self) -> list[Event]:
+        """Events; a line torn by a power cut is skipped."""
         if not self.events_path.exists():
             return []
+        events = []
         with open(self.events_path, encoding="utf-8") as fh:
-            return [Event.from_json(json.loads(line)) for line in fh if line.strip()]
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    events.append(Event.from_json(json.loads(line)))
+                except (ValueError, KeyError):
+                    continue
+        return events
+
+    def failure_cycles(self) -> list[int]:
+        """Cycles with a drive-attributed failure, from the logs (the source of truth).
+
+        A cycle counts when its row records a failure outcome or a cycle-failure
+        event names it, unless a port-fault event re-attributed it (F5).
+        """
+        port_faults = {int(e.detail.get("failure_cycle", -1)) for e in self.read_events()
+                       if e.type is EventType.PORT_FAULT}
+        failed = {int(r["cycle"]) for r in self.read_cycles()
+                  if r["outcome"] not in ("pass", "aborted")}
+        failed |= {e.cycle for e in self.read_events() if e.type is EventType.CYCLE_FAILURE}
+        return sorted(failed - port_faults)
+
+    def reconcile(self, state: DriveState) -> DriveState:
+        """Bring a resumed state in line with the logs.
+
+        A worker that dies after logging a cycle but before saving its state
+        would otherwise repeat that cycle number; here the last logged cycle
+        wins, and soft failures are recounted from the logs.
+        """
+        rows = self.read_cycles()
+        last = max((int(r["cycle"]) for r in rows), default=0)
+        if last > state.cycles_done:
+            state.cycles_done = last
+            state.bytes_written = sum(int(float(r["write_bytes"] or 0)) for r in rows)
+        state.soft_failures = self.failure_cycles()
+        return state
 
 
 def drive_ids(run_dir: Path) -> list[str]:

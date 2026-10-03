@@ -106,7 +106,8 @@ def mean_cumulative_function(units: Sequence[tuple[Sequence[float], float]],
         r = int(observed.sum())
         if r == 0:
             break
-        d_i = np.array([np.sum(e == time) for e in per_unit], dtype=float)
+        # an event counts only while its unit is still under observation
+        d_i = np.array([np.sum(e == time) for e in per_unit], dtype=float) * observed
         d = d_i.sum()
         mcf += d / r
         increments[:, k] = np.where(observed, (d_i - d / r) / r, 0.0)

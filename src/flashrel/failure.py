@@ -36,6 +36,7 @@ FAILURE_CODES: dict[Outcome, str] = {
     Outcome.CORRUPTION: "F1",
     Outcome.IO_ERROR: "F2",
     Outcome.DISCONNECTED: "F3",
+    Outcome.HANG: "F3",
     Outcome.READ_ONLY: "F4",
     Outcome.FS_FAULT: "F6",
 }

@@ -34,3 +34,16 @@ def test_simulate_then_analyze(tmp_path):
     sheets = pd.ExcelFile(out / "phase1.xlsx").sheet_names
     assert {"Drives", "Cycles", "Events", "LifeTable", "ByGroup", "ByWorkload"} <= set(sheets)
     assert main(["status", str(cfg)]) == 0
+
+
+def test_recheck_refuses_a_drive_that_is_not_in_attention(campaign, capsys):
+    rc = main(["recheck", str(campaign.source), "--drive", "T8-01", "--wait", "0"])
+    assert rc == 2 and "only for drives in the attention state" in capsys.readouterr().err
+
+
+def test_portcheck_refuses_a_test_drive(campaign, drive, capsys):
+    from flashrel.system.volumes import write_identity
+
+    write_identity(drive, "T8-01")
+    rc = main(["portcheck", str(campaign.source), "--port", "P1", "--mount", str(drive)])
+    assert rc == 2 and "reference drive only" in capsys.readouterr().err

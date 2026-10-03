@@ -31,7 +31,14 @@ from typing import TypeVar
 
 from flashrel.config import CycleSpec
 from flashrel.payload import PAYLOAD_DIR, CyclePlan, iter_expected
-from flashrel.system.directio import cache_bypass_supported, read_chunks, sync_files, write_file
+from flashrel.system.directio import (
+    cache_bypass_supported,
+    device_reads,
+    evict_cache,
+    read_chunks,
+    sync_files,
+    write_file,
+)
 from flashrel.system.errors import ErrorKind, classify_os_error, describe
 from flashrel.system.volumes import VolumeUsage, is_read_only, usage
 from flashrel.units import MiB, mb_per_s
@@ -50,6 +57,7 @@ class Outcome(str, Enum):
     CORRUPTION = "corruption"      # F1: data read back differs from data written
     IO_ERROR = "io_error"          # F2: unrecoverable read or write error
     DISCONNECTED = "disconnected"  # F3: drive vanished from the host
+    HANG = "hang"                  # F3: no I/O progress (watchdog)
     READ_ONLY = "read_only"        # F4: drive refuses writes
     FS_FAULT = "fs_fault"          # F6: file-system or capacity anomaly
     ABORTED = "aborted"            # stopped by the operator; not a test result
@@ -64,6 +72,11 @@ _FATAL = {
     ErrorKind.READ_ONLY: Outcome.READ_ONLY,
     ErrorKind.NO_SPACE: Outcome.FS_FAULT,
 }
+
+
+def _outcome_for(record: ErrorRecord) -> Outcome:
+    """Failure mode of an error that retries did not clear."""
+    return Outcome.FS_FAULT if record.kind is ErrorKind.FS_CORRUPT else Outcome.IO_ERROR
 
 
 @dataclass(frozen=True)
@@ -125,6 +138,7 @@ class CycleResult:
     errors: list[ErrorRecord] = field(default_factory=list)
     outcome: Outcome = Outcome.PASS
     cache_bypassed: bool = True
+    verify_device_reads: int | None = None  # ru_inblock over the verify phase (POSIX)
 
     @property
     def files_missing(self) -> int:
@@ -202,6 +216,7 @@ class CycleRunner:
         self.tick = progress or (lambda: None)
         self.sleep = sleep
         self.uncached = spec.readback == "uncached" and cache_bypass_supported()
+        self.evict = self.uncached and os.name != "nt"  # Windows reads unbuffered anyway
         self.root = mount / PAYLOAD_DIR
         self.result = CycleResult(drive_id=drive_id, cycle=cycle, workload=workload, host=host,
                                   port=port, started_at=datetime.now(timezone.utc),
@@ -232,11 +247,13 @@ class CycleRunner:
         except CycleAborted as abort:
             res.outcome = abort.outcome
         except _FileFailed as failed:
-            res.outcome = Outcome.IO_ERROR
+            res.outcome = _outcome_for(failed.record)
             res.errors.append(failed.record)
         finally:
             res.ended_at = datetime.now(timezone.utc)
-        if res.outcome is Outcome.PASS and res.bad_files:
+        # Corruption found in the read-back is the primary finding even when the
+        # delete phase fails afterwards; the delete error stays in ``errors``.
+        if res.bad_files and res.outcome in (Outcome.PASS, Outcome.FS_FAULT):
             res.outcome = Outcome.CORRUPTION
         if res.outcome is Outcome.PASS and res.unreadable_files:
             res.outcome = Outcome.IO_ERROR
@@ -267,6 +284,14 @@ class CycleRunner:
         if not per_file_sync:
             self._attempt("write", cycle_dir, partial(sync_files, written))
         stats.seconds = time.perf_counter() - t_phase
+        if self.evict:  # outside the timed phase: drop cached pages before the read-back
+            for path in written:
+                try:
+                    evict_cache(path)
+                except OSError:
+                    # Not a drive failure: the read-back may hit the cache, which the
+                    # device-read measurement of the verify phase will show.
+                    self.result.cache_bypassed = False
 
     def _verify_phase(self, plan: CyclePlan, cycle_dir: Path) -> None:
         stats, res = self.result.verify, self.result
@@ -274,6 +299,7 @@ class CycleRunner:
         def reader(path: Path, chunk_size: int) -> Iterator[bytes]:
             return _ticking(read_chunks(path, chunk_size, uncached=self.uncached), self.tick)
 
+        reads_before = device_reads()
         t_phase = time.perf_counter()
         for spec in plan.files:
             self._check_stop()
@@ -301,6 +327,12 @@ class CycleRunner:
             if check.status is not FileStatus.OK:
                 res.bad_files.append(check)
         stats.seconds = time.perf_counter() - t_phase
+        reads_after = device_reads()
+        if reads_before is not None and reads_after is not None:
+            # Measured, not assumed: a read-back that reached the drive raises ru_inblock.
+            res.verify_device_reads = reads_after - reads_before
+            res.cache_bypassed = self.uncached and (res.verify_device_reads > 0
+                                                    or stats.bytes == 0)
 
     def _delete_phase(self, plan: CyclePlan, cycle_dir: Path) -> None:
         stats = self.result.delete
@@ -308,6 +340,7 @@ class CycleRunner:
         try:
             self._attempt("delete", cycle_dir, partial(_remove_tree, cycle_dir, self.tick))
         except _FileFailed as failed:
+            self.result.errors.append(failed.record)
             raise CycleAborted(Outcome.FS_FAULT, failed.record) from None
         stats.files, stats.bytes = len(plan.files), plan.total_bytes
         stats.seconds = time.perf_counter() - t0
@@ -315,9 +348,12 @@ class CycleRunner:
     # -- helpers --------------------------------------------------------------------------
     def _clear_leftovers(self) -> None:
         """Remove directories left by an interrupted cycle."""
-        if not self.root.exists():
-            return
-        leftovers = [p for p in self.root.iterdir() if p.is_dir()]
+        def listing() -> list[Path]:
+            if not self.root.exists():
+                return []
+            return [p for p in self.root.iterdir() if p.is_dir()]
+
+        leftovers = self._attempt("setup", self.root, listing)
         self.result.leftover_dirs = len(leftovers)
         for path in leftovers:
             self._attempt("setup", path, partial(_remove_tree, path, self.tick))

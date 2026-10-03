@@ -48,13 +48,23 @@ def pooled_shape(groups, default: float = 2.0) -> float:
         return default
 
 
+def try_weibull(t: np.ndarray, d: np.ndarray):
+    """MLE fit, or None when the data cannot determine it (e.g. all failures tied at the end)."""
+    if d.sum() < 2:
+        return None
+    try:
+        return fit_weibull_mle(t, d)
+    except ValueError:
+        return None
+
+
 def fit_table(groups, *, assumed_shape: float = 2.0, level: float = 0.90) -> pd.DataFrame:
-    """Weibull MLE per group, or a Weibayes bound when a group has < 2 failures."""
+    """Weibull MLE per group, or a Weibayes bound when the MLE is not estimable."""
     rows = []
     for g, (t, d) in groups.items():
         row = {"group": g, "drives": len(t), "failures": int(d.sum())}
-        if d.sum() >= 2:
-            f = fit_weibull_mle(t, d)
+        f = try_weibull(t, d)
+        if f is not None:
             lo_s, hi_s = f.interval("shape", level)
             lo_t, hi_t = f.interval("scale", level)
             row.update(shape=f.shape, shape_lo=lo_s, shape_hi=hi_s, scale=f.scale,
@@ -93,7 +103,7 @@ def analyze_campaign(campaign: Campaign, out_dir: Path, *, threshold: float = 0.
             written[f"weibull_{endpoint}"] = path
 
     groups = group_data(life, "hard")
-    fits = {g: fit_weibull_mle(t, d) for g, (t, d) in groups.items() if d.sum() >= 2}
+    fits = {g: f for g, (t, d) in groups.items() if (f := try_weibull(t, d)) is not None}
     if len(fits) >= 2:
         test = lr_test_common_shape({g: groups[g] for g in fits})
         pd.DataFrame([test]).to_csv(out / "common_shape_test.csv", index=False)
@@ -127,10 +137,13 @@ def analyze_campaign(campaign: Campaign, out_dir: Path, *, threshold: float = 0.
         model.table(level).to_csv(out / "regression.csv", index=False)
         written["regression"] = out / "regression.csv"
 
-    if not cycles.empty and (cycles["outcome"] != "pass").sum() >= 3:
+    failed = ~cycles["outcome"].isin(["pass", "aborted", "port_fault"]) if not cycles.empty \
+        else pd.Series(dtype=bool)
+    if not cycles.empty and failed.sum() >= 3:
         covariates = [c for c in ("brand", "capacity_gb") if cycles[c].nunique() > 1]
-        x, y, names = per_cycle_design(cycles, covariates=covariates)
-        fit_cloglog(x, y, names).table(level).to_csv(out / "per_cycle_hazard.csv", index=False)
+        x, y, names, clusters = per_cycle_design(cycles, covariates=covariates)
+        fit = fit_cloglog(x, y, names, clusters=clusters)
+        fit.table(level).to_csv(out / "per_cycle_hazard.csv", index=False)
         written["per_cycle_hazard"] = out / "per_cycle_hazard.csv"
 
     events = events_frame(campaign)

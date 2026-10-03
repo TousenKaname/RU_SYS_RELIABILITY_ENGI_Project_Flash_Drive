@@ -7,18 +7,42 @@ import dataclasses
 import json
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from flashrel import __version__
 from flashrel.config import load_campaign
 from flashrel.failure import DriveStatus, Event, EventType
-from flashrel.recorder import DriveLog
+from flashrel.recorder import DriveBusy, DriveLog, drive_lock
 from flashrel.system.volumes import candidate_mounts, read_identity, wait_for_drive
 from flashrel.units import format_bytes
 
 
 def _campaign(args):
     return load_campaign(args.config)
+
+
+class CommandError(RuntimeError):
+    """A refused operator command; the message says why and what to do."""
+
+
+@contextmanager
+def _operating_on(campaign, drive_id: str) -> Iterator[tuple[DriveLog, object]]:
+    """Exclusive access to a drive's state for an operator command.
+
+    Holding the worker's own lock means a command can never race a running
+    worker: it either waits for the operator to stop the worker or refuses.
+    """
+    if drive_id not in campaign.assignments:
+        raise CommandError(f"{drive_id} is not part of campaign {campaign.name}")
+    try:
+        with drive_lock(campaign.name, drive_id):
+            log = DriveLog(campaign.run_dir, drive_id)
+            yield log, log.reconcile(log.load_state())
+    except DriveBusy:
+        raise CommandError(f"{drive_id} is being tested by a worker on this host; stop it "
+                           "first (Ctrl+C its supervisor)") from None
 
 
 # -- harness commands ---------------------------------------------------------------------
@@ -40,8 +64,11 @@ def cmd_enroll(args) -> int:
 
     campaign = _campaign(args)
     try:
-        record = enroll(Path(args.mount), campaign, args.drive,
-                        capacity_test=not args.skip_capacity_test, force=args.force)
+        with drive_lock(campaign.name, args.drive):
+            record = enroll(Path(args.mount), campaign, args.drive,
+                            capacity_test=not args.skip_capacity_test, force=args.force)
+    except DriveBusy:
+        raise CommandError(f"{args.drive} is being tested on this host; stop its worker first")
     except EnrollmentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -92,29 +119,33 @@ def cmd_recheck(args) -> int:
     from flashrel.runner import check_drive, check_summary
 
     campaign = _campaign(args)
-    log = DriveLog(campaign.run_dir, args.drive)
-    state = log.load_state()
-    mount = wait_for_drive(args.drive, timeout_s=args.wait)
-    if mount is None:
-        print(f"{args.drive} is not mounted; plug it in and try again", file=sys.stderr)
-        return 2
-    port = args.port or state.port or campaign.assignments[args.drive].port
-    result = check_drive(mount, campaign, args.drive, host=args.host or state.host, port=port)
-    summary = check_summary(result)
-    print(json.dumps(summary, indent=2))
-    if result.outcome is not Outcome.PASS:
-        print("check FAILED: try another port; if it fails there too, run `flashrel retire`",
-              file=sys.stderr)
-        return 1
-    moved = port != (state.port or campaign.assignments[args.drive].port)
-    log.append_event(Event(args.drive, state.cycles_done, EventType.RECOVERED, "D2", {
-        "recovered_by": "operator re-check", "port": port, "moved_port": moved,
-        "check": summary}))
-    state.status, state.port = DriveStatus.ACTIVE, port
-    log.save_state(state)
-    print(f"{args.drive} is active again on port {port}")
-    if moved:
-        print("the drive passed on a new port: test the old port with the reference drive "
+    with _operating_on(campaign, args.drive) as (log, state):
+        if state.status is not DriveStatus.ATTENTION:
+            raise CommandError(f"{args.drive} is {state.status.value}; recheck is only for "
+                               "drives in the attention state")
+        mount = wait_for_drive(args.drive, timeout_s=args.wait)
+        if mount is None:
+            raise CommandError(f"{args.drive} is not mounted; plug it in and try again")
+        old_port = state.port or campaign.assignments[args.drive].port
+        port, host = args.port or old_port, args.host or state.host
+        result = check_drive(mount, campaign, args.drive, host=host, port=port)
+        summary = check_summary(result)
+        print(json.dumps(summary, indent=2))
+        if result.outcome is not Outcome.PASS:
+            log.append_event(Event(args.drive, state.cycles_done, EventType.ATTENTION, "", {
+                "reason": "operator re-check failed", "port": port, "host": host,
+                "check": summary}))
+            print("check FAILED: try the spare port; if it fails there too, reformat once and "
+                  "recheck, then `flashrel retire`", file=sys.stderr)
+            return 1
+        log.append_event(Event(args.drive, state.cycles_done, EventType.RECOVERED, "D2", {
+            "recovered_by": "operator re-check", "port": port, "host": host,
+            "moved_port": port != old_port, "check": summary}))
+        state.status, state.port, state.host = DriveStatus.ACTIVE, port, host
+        log.save_state(state)
+    print(f"{args.drive} is active again on {host or 'its host'} port {port}")
+    if port != old_port:
+        print(f"the drive passed on a new port: test port {old_port} with the reference drive "
               "(`flashrel portcheck`) and log `flashrel port-fault` if the reference fails there")
     return 0
 
@@ -124,6 +155,10 @@ def cmd_portcheck(args) -> int:
     from flashrel.runner import check_drive, check_summary
 
     campaign = _campaign(args)
+    ident = read_identity(Path(args.mount)) or {}
+    if ident.get("drive_id") in campaign.assignments:
+        raise CommandError(f"{args.mount} holds test drive {ident['drive_id']}; port checks "
+                           "use the reference drive only")
     result = check_drive(Path(args.mount), campaign, "REF", port=args.port)
     print(json.dumps(check_summary(result), indent=2))
     ok = result.outcome is Outcome.PASS
@@ -133,35 +168,42 @@ def cmd_portcheck(args) -> int:
 
 def cmd_port_fault(args) -> int:
     campaign = _campaign(args)
-    log = DriveLog(campaign.run_dir, args.drive)
-    log.append_event(Event(args.drive, args.cycle, EventType.PORT_FAULT, "F5", {
-        "failure_cycle": args.cycle, "port": args.port, "reason": args.reason}))
+    with _operating_on(campaign, args.drive) as (log, state):
+        if args.cycle not in log.failure_cycles():
+            raise CommandError(f"cycle {args.cycle} of {args.drive} is not a logged failure")
+        log.append_event(Event(args.drive, args.cycle, EventType.PORT_FAULT, "F5", {
+            "failure_cycle": args.cycle, "port": args.port, "reason": args.reason}))
+        state.soft_failures = log.failure_cycles()
+        log.save_state(state)
     print(f"cycle-{args.cycle} failure of {args.drive} re-attributed to port {args.port} (F5)")
     return 0
 
 
 def cmd_retire(args) -> int:
     campaign = _campaign(args)
-    log = DriveLog(campaign.run_dir, args.drive)
-    state = log.load_state()
-    log.append_event(Event(args.drive, state.cycles_done, EventType.HARD_FAILURE, args.code,
-                           {"reason": args.reason, "retired_by": "operator"}))
-    state.status = DriveStatus.FAILED
-    log.save_state(state)
+    with _operating_on(campaign, args.drive) as (log, state):
+        if state.status in (DriveStatus.FAILED, DriveStatus.CENSORED):
+            raise CommandError(f"{args.drive} is already {state.status.value}")
+        log.append_event(Event(args.drive, state.cycles_done, EventType.HARD_FAILURE,
+                               args.code, {"reason": args.reason, "retired_by": "operator"}))
+        state.status = DriveStatus.FAILED
+        log.save_state(state)
     print(f"{args.drive} retired at cycle {state.cycles_done} ({args.code})")
     return 0
 
 
 def cmd_note(args) -> int:
     campaign = _campaign(args)
-    log = DriveLog(campaign.run_dir, args.drive)
-    state = log.load_state()
     detail = {"text": args.text}
-    if args.port:
-        detail["port"] = args.port
-        state.port = args.port
+    if not args.port:  # a plain note only appends an event, safe while the worker runs
+        log = DriveLog(campaign.run_dir, args.drive)
+        log.append_event(Event(args.drive, log.load_state().cycles_done, EventType.NOTE, "",
+                               detail))
+        return 0
+    with _operating_on(campaign, args.drive) as (log, state):
+        detail["port"] = state.port = args.port
         log.save_state(state)
-    log.append_event(Event(args.drive, state.cycles_done, EventType.NOTE, "", detail))
+        log.append_event(Event(args.drive, state.cycles_done, EventType.NOTE, "", detail))
     return 0
 
 
@@ -192,8 +234,14 @@ def cmd_selftest(args) -> int:
     clean = run_cycle(work, planner, spec, drive_id="SELFTEST", cycle=1, workload="selftest")
     faulty = run_cycle(work, planner, spec, drive_id="SELFTEST", cycle=1, workload="selftest",
                        fault_hook=flip)
+    if clean.verify_device_reads is None:  # Windows: FILE_FLAG_NO_BUFFERING reads the device
+        reached = ("read-back reaches the device (unbuffered I/O)", cache_bypass_supported())
+    else:
+        reached = (f"read-back reaches the device ({clean.verify_device_reads} block reads "
+                   "measured)", clean.verify_device_reads > 0)
     checks = {
         "cache bypass available": cache_bypass_supported(),
+        reached[0]: reached[1],
         "clean cycle passes": clean.outcome is Outcome.PASS,
         "injected bit flip detected": faulty.outcome is Outcome.CORRUPTION
         and faulty.bits_corrupt == 1,
@@ -202,6 +250,9 @@ def cmd_selftest(args) -> int:
           f"read {clean.verify.mbps:.1f} MB/s ({clean.planned_files} files)")
     for name, ok in checks.items():
         print(f"  [{'ok' if ok else 'FAIL'}] {name}")
+    if not reached[1]:
+        print("  the read-back came from the host cache: do not trust this host's results",
+              file=sys.stderr)
     return 0 if all(checks.values()) else 1
 
 
@@ -302,7 +353,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except CommandError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
