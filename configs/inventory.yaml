@@ -1,0 +1,34 @@
+# Drives under test. One group per purchase lot; the unit ID is written on each drive.
+# Specifications are as printed on the Amazon listings (October 2026); the intake
+# screening (`flashrel enroll`) measures the real capacity and throughput.
+
+groups:
+  S8:
+    brand: SanDisk
+    model: Cruzer Blade SDCZ50 (2-pack)
+    capacity_gb: 8
+    interface: USB 2.0
+    housing: plastic
+    listed_write: up to 60 MB/s
+    unit_price_usd: 9.99
+  A16:
+    brand: ABLAZE
+    model: metal keychain drive (2-pack)
+    capacity_gb: 16
+    interface: USB 2.0
+    housing: metal
+    listed_write: 10 (no unit)
+    unit_price_usd: 7.50
+  A8:
+    brand: ABLAZE
+    model: metal keychain drive (5-pack)
+    capacity_gb: 8
+    interface: USB 2.0
+    housing: metal
+    listed_write: 10 (no unit)
+    unit_price_usd: 4.40
+
+units:
+  S8: [S8-01, S8-02]
+  A16: [A16-01, A16-02]
+  A8: [A8-01, A8-02, A8-03, A8-04, A8-05]

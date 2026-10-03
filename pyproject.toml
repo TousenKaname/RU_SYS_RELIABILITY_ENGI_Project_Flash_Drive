@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashrel"
+version = "0.1.0"
+description = "Automated endurance testing and reliability analysis of USB flash drives under repeated copy-verify-delete cycling."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Guoan Wang" },
+  { name = "Shangqing Wei" },
+  { name = "Mengtong Ai" },
+]
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+analysis = ["numpy>=1.24", "scipy>=1.10", "pandas>=2.0", "matplotlib>=3.7", "openpyxl>=3.1"]
+sensors = ["pyserial>=3.5"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+flashrel = "flashrel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

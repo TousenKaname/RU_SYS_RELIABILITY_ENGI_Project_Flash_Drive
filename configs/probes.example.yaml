@@ -1,0 +1,6 @@
+# DS18B20 ROM code (as printed by the Arduino) -> logical probe name.
+# Copy to probes.yaml and replace the codes with the ones on your probes.
+28FF4A1B6C1403C1: S8-01
+28FF0D2A6C14036E: A16-01
+28FF9C1E6C140377: A8-01
+28FF31A06B1403D2: ambient-W

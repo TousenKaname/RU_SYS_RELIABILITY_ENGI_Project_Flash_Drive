@@ -1,0 +1,51 @@
+# Phase 1: all nine drives on two hosts, every drive rotating through the three
+# file-size workloads (small -> medium -> large -> small ...).
+#
+# Host W = Windows desktop: rear-panel ports W1-W3 and USB dock A (ports A1-A3)
+# Host M = MacBook: USB-C dock B (ports B1-B3)
+# Each host carries one drive of every group, so host effects cannot masquerade
+# as brand or capacity effects.
+
+campaign: phase1
+seed: 20261012
+data_dir: ../data            # relative to this file; point it at a synced folder in practice
+inventory: inventory.yaml
+
+cycle:
+  fill_fraction: 0.90        # each cycle fills 90 % of the free space ...
+  reserve: 64MiB             # ... and never the last 64 MiB
+  chunk_size: 1MiB
+  fsync: per_file            # every file is flushed to the drive before the next one
+  readback: uncached         # verification reads bypass the host page cache
+  retries: 2
+  retry_backoff_s: 5
+
+workloads:
+  small:  {min_size: 4KiB,   max_size: 256KiB, files_per_dir: 256}
+  medium: {min_size: 1MiB,   max_size: 64MiB,  files_per_dir: 64}
+  large:  {min_size: 512MiB, max_size: 2GiB,   files_per_dir: 8}
+
+rotation: [small, medium, large]
+
+failure:
+  baseline_cycles: 2         # first two passing cycles of each workload set the baseline
+  slow_fraction: 0.5         # D1 when write throughput stays below 50 % of baseline ...
+  slow_window: 3             # ... for three consecutive cycles of that workload
+  reconnect_timeout_s: 120   # wait this long for a vanished drive to come back
+  hang_timeout_s: 600        # no I/O progress for 10 min = hang (F3)
+  intermittent_limit: 3      # three cycle failures ...
+  intermittent_window: 10    # ... within ten cycles end the drive's life (hard failure)
+
+stop:
+  end_time: 2026-12-01T09:00:00   # local time; drives still running are censored here
+
+assignments:
+  S8-01:  {host: W, port: W1}
+  A16-01: {host: W, port: W2}
+  A8-01:  {host: W, port: W3}
+  A8-02:  {host: W, port: A1}
+  A8-03:  {host: W, port: A2}
+  A8-04:  {host: W, port: A3}
+  S8-02:  {host: M, port: B1}
+  A16-02: {host: M, port: B2}
+  A8-05:  {host: M, port: B3}
