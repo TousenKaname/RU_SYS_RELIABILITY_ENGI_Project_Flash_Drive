@@ -129,13 +129,14 @@ DEFAULT_RIG = {
 def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
     """Panel a: the host, its three connection paths and the drives. Panel b: data path."""
     rig = rig or DEFAULT_RIG
-    fig, ax = _canvas(182, 76)
+    fig, ax = _canvas(182, 74)
+    head = 71.2   # baseline of the panel letters and section headers
 
     # ---------------- panel a: physical rig ----------------
-    _panel(ax, 0.5, 73.0, "a")
-    _section(ax, 5, 73.0, "Host")
-    _section(ax, 57, 73.0, "Hubs")
-    _section(ax, 85, 73.0, "Drives under test")
+    _panel(ax, 0.5, head, "a")
+    _section(ax, 5, head, "Host")
+    _section(ax, 57, head, "Hubs")
+    _section(ax, 85, head, "Drives under test")
     rows = {"rear": (66.0, 60.5, 55.0), "dockA": (45.0, 39.5, 34.0),
             "dockB": (23.0, 17.5, 12.0)}
     port_x = 87.0
@@ -182,8 +183,8 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
         _text(ax, x + 6.0, 3.8, GROUP_LABELS[g], size=5.6, ha="left")
 
     # ---------------- panel b: data path ----------------
-    _panel(ax, 128.5, 73.0, "b")
-    _section(ax, 133, 73.0, "Data path")
+    _panel(ax, 128.5, head, "b")
+    _section(ax, 133, head, "Data path")
     steps = [
         ("Drive workers", "one process per drive on host W"),
         ("Local logs", "cycles.csv · events.jsonl · state.json"),
@@ -207,9 +208,9 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
 # -- figure: test cycle and failure handling -------------------------------------------------
 def cycle_flowchart():
     """One cycle (top row) and what happens when a phase fails (bottom rows)."""
-    fig, ax = _canvas(182, 76)
+    fig, ax = _canvas(182, 79.5)
     dash = (0, (2.4, 1.6))
-    _section(ax, 3, 73.5, "One test cycle, repeated until the drive fails or the test stops")
+    _section(ax, 3, 77.0, "One test cycle, repeated until the drive fails or the test stops")
 
     main = [
         ("Locate drive", "by its identity file,\nnot its drive letter"),
@@ -219,7 +220,7 @@ def cycle_flowchart():
         ("Delete", "remove the files; check\nthe space comes back"),
         ("Log and assess", "cycle record; slowdown (D1),\ntransient errors (D3)"),
     ]
-    w, h, gap, x0, y0 = 26.0, 14.0, 3.6, 3.0, 49.0
+    w, h, gap, x0, y0 = 26.0, 14.0, 3.6, 3.0, 52.5
     centers = []
     for i, (title, sub) in enumerate(main):
         x = x0 + i * (w + gap)
@@ -237,7 +238,7 @@ def cycle_flowchart():
           size=5.6, color=GRAY)
 
     # failure path from the timed phases down to the retry box
-    bus_y, y1, h1 = 43.0, 21.0, 15.0
+    bus_y, y1, h1 = 44.5, 21.0, 15.0
     retry_cx = 14.5
     for i in (2, 3, 4):
         _poly(ax, [(centers[i], y0), (centers[i], bus_y)], color=FAIL, ls=dash)
