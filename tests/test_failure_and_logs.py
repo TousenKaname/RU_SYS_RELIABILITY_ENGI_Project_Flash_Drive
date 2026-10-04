@@ -86,14 +86,16 @@ def test_drive_lock_is_exclusive():
 
 
 def test_repository_configs_load():
-    phase1 = load_campaign(REPO / "configs" / "phase1.yaml")
-    assert len(phase1.assignments) == 9
-    assert {a.host for a in phase1.assignments.values()} == {"W", "M"}
+    campaign = load_campaign(REPO / "configs" / "campaign.yaml")
+    assert len(campaign.assignments) == 9
+    assert {a.host for a in campaign.assignments.values()} == {"W", "M"}
     for host in ("W", "M"):  # every host carries every group
-        groups = {phase1.inventory[a.drive_id].group.code for a in phase1.drives_on(host)}
+        groups = {campaign.inventory[a.drive_id].group.code for a in campaign.drives_on(host)}
         assert groups == {"S8", "A8", "A16"}
-    assert [phase1.workload_for_cycle(c).name for c in (1, 2, 3, 4)] == \
+    assert [campaign.workload_for_cycle(c).name for c in (1, 2, 3, 4)] == \
         ["small", "medium", "large", "small"]
+    # the test ends on 18 Oct 2026, 09:00, in time for the analysis and the slides
+    assert campaign.stop.end_time == datetime(2026, 10, 18, 9, 0)
 
 
 def test_bad_config_is_rejected(tmp_path):

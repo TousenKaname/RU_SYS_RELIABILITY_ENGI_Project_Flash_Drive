@@ -1,12 +1,15 @@
-# Phase 1: all nine drives on two hosts, every drive rotating through the three
+# The test: all nine drives on two hosts, every drive rotating through the three
 # file-size workloads (small -> medium -> large -> small ...).
 #
 # Host W = Windows desktop: rear-panel ports W1-W3 and USB dock A (ports A1-A3)
 # Host M = MacBook: USB-C dock B (ports B1-B3)
 # Each host carries one drive of every group, so host effects cannot masquerade
 # as brand or capacity effects.
+#
+# Timeline: pilot on S8-01 and A8-01 from 5 Oct (evening), all nine drives from
+# 6 Oct 09:00, stop on 18 Oct 09:00.
 
-campaign: phase1
+campaign: fall2026
 seed: 20261012
 data_dir: ../data            # relative to this file; point it at a synced folder in practice
 inventory: inventory.yaml
@@ -37,7 +40,7 @@ failure:
   intermittent_window: 10    # ... within ten cycles end the drive's life (hard failure)
 
 stop:
-  end_time: 2026-12-01T09:00:00   # local time; drives still running are censored here
+  end_time: 2026-10-18T09:00:00   # local time; drives still running are censored here
 
 assignments:
   S8-01:  {host: W, port: W1}

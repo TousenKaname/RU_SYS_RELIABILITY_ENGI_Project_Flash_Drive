@@ -1,13 +1,15 @@
-"""Drive intake: enrollment, capacity (counterfeit) screening, baseline throughput.
+"""Drive intake: enrollment and an optional capacity (counterfeit) screen.
 
-Before a drive joins a campaign it is
+Before a drive joins a campaign it is given an identity file that names its
+unit ID (also written on its label). The first test cycle then fills 90 % of
+the free space and verifies every byte, so a counterfeit drive that wraps
+writes around its real capacity already shows up there as chunks that belong
+to other files (``misdirected``).
 
-1. given an identity file that names its unit ID (also written on its label);
-2. screened for fake capacity: large files fill 99 % of the free space and are
-   read back. A counterfeit drive that wraps writes around its real capacity
-   returns chunks that belong to other files (``misdirected``) and fails here;
-3. measured by that same full pass, which gives its baseline sequential
-   throughput (recorded as cycle 0, not counted as a test cycle).
+The optional capacity screen (``capacity_test=True``) does the same check
+before the test, over 99 % of the free space, and records the baseline
+sequential throughput as cycle 0 (not counted as a test cycle). It costs one
+full write and read of the drive.
 """
 
 from __future__ import annotations
@@ -44,9 +46,9 @@ class EnrollmentError(RuntimeError):
     pass
 
 
-def enroll(mount: Path, campaign: Campaign, drive_id: str, *, capacity_test: bool = True,
+def enroll(mount: Path, campaign: Campaign, drive_id: str, *, capacity_test: bool = False,
            force: bool = False, stop: threading.Event | None = None) -> dict[str, Any]:
-    """Enroll the volume at ``mount`` as drive ``drive_id`` and screen it."""
+    """Enroll the volume at ``mount`` as drive ``drive_id``, optionally screening it."""
     unit = campaign.inventory[drive_id]
     mount = Path(mount)
     current = read_identity(mount)

@@ -58,6 +58,13 @@ def try_weibull(t: np.ndarray, d: np.ndarray):
         return None
 
 
+def weibayes_bounds(groups, fits, level: float = 0.90) -> dict[str, tuple[float, float]]:
+    """(shape, lower bound on theta) for every group without an ML fit, at the pooled shape."""
+    shape = pooled_shape(groups)
+    return {g: (shape, weibayes_lower_bound(t, d, shape, level))
+            for g, (t, d) in groups.items() if g not in fits}
+
+
 def fit_table(groups, *, assumed_shape: float = 2.0, level: float = 0.90) -> pd.DataFrame:
     """Weibull MLE per group, or a Weibayes bound when the MLE is not estimable."""
     rows = []
@@ -109,8 +116,9 @@ def analyze_campaign(campaign: Campaign, out_dir: Path, *, threshold: float = 0.
         pd.DataFrame([test]).to_csv(out / "common_shape_test.csv", index=False)
         written["common_shape_test"] = out / "common_shape_test.csv"
     fig, axes = plt.subplots(1, 2, figsize=(style.PAGE_W, 2.4))
-    if any(d.any() for _, d in groups.values()):
-        weibull_probability_plot(axes[0], groups, fits)
+    if groups:
+        weibull_probability_plot(axes[0], groups, fits,
+                                 bounds=weibayes_bounds(groups, fits, level))
     km_plot(axes[1], groups, level)
     written["fig_life"] = style.save(fig, out / "fig_life")[0]
 

@@ -2,17 +2,18 @@
 
 The drawings are built from a few primitives in millimetre coordinates, so
 they come out as crisp vectors at their printed size and share the typography
-and colours of the data figures.
+and colours of the data figures. Colour carries meaning only: group colours
+for drives, blue for data flow, vermilion for failures, green for recovery.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle
+from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle
 
 from flashrel.viz.style import (
     FAIL,
@@ -21,7 +22,6 @@ from flashrel.viz.style import (
     GROUP_LABELS,
     HAIRLINE,
     INK,
-    MIST,
     MM,
     PAGE_W,
     PAPER,
@@ -29,7 +29,13 @@ from flashrel.viz.style import (
     text_on,
 )
 
-DATA = "#3B6E8F"  # data-flow lines
+DATA = "#3B6E8F"        # data flow
+CABLE = "#8C8C8C"       # USB cables
+EDGE = "#A9A9A9"        # outline of neutral boxes
+IO_FILL, IO_EDGE = "#EAF0F5", "#A7BACB"          # the three timed I/O phases
+FAIL_FILL, FAIL_EDGE = "#FBEDE9", "#E0A595"      # failure handling
+PASS_FILL, PASS_EDGE = "#EAF3ED", "#9CC3AC"      # recovery
+REF_FILL = "#CFCFCF"                             # reference drive
 
 
 # -- primitives -------------------------------------------------------------------------------
@@ -43,60 +49,70 @@ def _canvas(width_mm: float, height_mm: float):
     return fig, ax
 
 
-def _box(ax, x, y, w, h, *, fc="white", ec=INK, lw=0.6, r=1.2, ls="-", z=2):
+def _box(ax, x, y, w, h, *, fc="white", ec=EDGE, lw=0.5, r=1.2, z=2):
     ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}",
-                                fc=fc, ec=ec, lw=lw, ls=ls, zorder=z))
+                                fc=fc, ec=ec, lw=lw, zorder=z))
 
 
-def _text(ax, x, y, s, *, size=6.5, weight="normal", color=INK, ha="center", va="center",
+def _text(ax, x, y, s, *, size=6.0, weight="normal", color=INK, ha="center", va="center",
           style="normal", z=5, **kw):
     ax.text(x, y, s, fontsize=size, fontweight=weight, color=color, ha=ha, va=va,
-            fontstyle=style, zorder=z, linespacing=1.25, **kw)
+            fontstyle=style, zorder=z, linespacing=1.3, **kw)
 
 
-def _poly(ax, pts, *, color=INK, lw=0.6, ls="-", z=1):
+def _poly(ax, pts, *, color=CABLE, lw=0.6, ls="-", z=1):
     xs, ys = zip(*pts)
-    ax.plot(xs, ys, color=color, lw=lw, ls=ls, zorder=z, solid_capstyle="butt")
+    ax.plot(xs, ys, color=color, lw=lw, ls=ls, zorder=z, solid_capstyle="butt",
+            solid_joinstyle="miter")
 
 
-def _arrow(ax, p0, p1, *, color=INK, lw=0.6, ls="-", head=4.5, z=3, rad=0.0):
+def _arrow(ax, p0, p1, *, color=INK, lw=0.6, ls="-", head=4.2, z=3):
     ax.add_patch(FancyArrowPatch(p0, p1, arrowstyle="-|>", mutation_scale=head, color=color,
-                                 lw=lw, ls=ls, zorder=z, shrinkA=0, shrinkB=0,
-                                 connectionstyle=f"arc3,rad={rad}"))
+                                 lw=lw, ls=ls, zorder=z, shrinkA=0, shrinkB=0))
+
+
+def _panel(ax, x, y, letter):
+    _text(ax, x, y, letter, size=8, weight="bold", ha="left")
 
 
 def _section(ax, x, y, s, ha="left"):
-    _text(ax, x, y, s.upper(), size=5.6, color=GRAY, ha=ha, weight="bold")
+    _text(ax, x, y, s.upper(), size=5.5, color=GRAY, ha=ha, weight="bold")
 
 
-def _monitor(ax, x, y, s=1.0):
-    ax.add_patch(Rectangle((x, y + 1.6 * s), 7 * s, 4.4 * s, fc=PAPER, ec=INK, lw=0.5, zorder=4))
-    _poly(ax, [(x + 3.5 * s, y + 1.6 * s), (x + 3.5 * s, y + 0.5 * s)], lw=0.5, z=4)
-    _poly(ax, [(x + 2 * s, y + 0.5 * s), (x + 5 * s, y + 0.5 * s)], lw=0.5, z=4)
+def _monitor(ax, x, y):
+    ax.add_patch(Rectangle((x, y + 1.7), 7.2, 4.6, fc=PAPER, ec=GRAY, lw=0.45, zorder=4))
+    _poly(ax, [(x + 3.6, y + 1.7), (x + 3.6, y + 0.6)], color=GRAY, lw=0.45, z=4)
+    _poly(ax, [(x + 2.1, y + 0.6), (x + 5.1, y + 0.6)], color=GRAY, lw=0.45, z=4)
 
 
-def _laptop(ax, x, y, s=1.0):
-    ax.add_patch(Rectangle((x + 0.8 * s, y + 1.4 * s), 5.4 * s, 3.8 * s, fc=PAPER, ec=INK,
-                           lw=0.5, zorder=4))
-    ax.add_patch(Polygon([(x, y + 0.4 * s), (x + 7 * s, y + 0.4 * s), (x + 6.2 * s, y + 1.4 * s),
-                          (x + 0.8 * s, y + 1.4 * s)], closed=True, fc=PAPER, ec=INK, lw=0.5,
+def _laptop(ax, x, y):
+    ax.add_patch(Rectangle((x + 0.9, y + 1.5), 5.4, 3.8, fc=PAPER, ec=GRAY, lw=0.45, zorder=4))
+    ax.add_patch(Polygon([(x, y + 0.5), (x + 7.2, y + 0.5), (x + 6.3, y + 1.5),
+                          (x + 0.9, y + 1.5)], closed=True, fc=PAPER, ec=GRAY, lw=0.45,
                          zorder=4))
 
 
-def _usb_stick(ax, x, y, label, color, *, w=17.0, h=4.4, probe=True):
-    """A drive plugged into a port at (x, y): connector, body, unit ID, probe dot."""
-    ax.add_patch(Rectangle((x, y - 1.25), 2.6, 2.5, fc="white", ec=INK, lw=0.5, zorder=4))
-    _box(ax, x + 2.6, y - h / 2, w, h, fc=color, ec=color, lw=0.5, r=1.0, z=4)
-    _text(ax, x + 2.6 + w / 2 - (1.2 if probe else 0), y, label, size=5.9, weight="bold",
-          color=text_on(color))
-    if probe:
-        ax.plot(x + 2.6 + w - 2.0, y, marker="o", ms=2.3, mfc=INK, mec="white", mew=0.4,
-                zorder=6)
+def _host(ax, x, y, w, h, title, subtitle, lines, icon: Callable):
+    _box(ax, x, y, w, h)
+    icon(ax, x + w - 10.5, y + h - 8.6)
+    _text(ax, x + 3, y + h - 4.4, title, size=7.0, weight="bold", ha="left")
+    _text(ax, x + 3, y + h - 8.2, subtitle, size=5.7, color=GRAY, ha="left")
+    _poly(ax, [(x + 3, y + h - 11.0), (x + w - 3, y + h - 11.0)], color=HAIRLINE, lw=0.5)
+    for i, line in enumerate(lines):
+        _text(ax, x + 3, y + h - 14.4 - 3.4 * i, line, size=5.7, ha="left")
 
 
 def _port(ax, x, y, label):
-    ax.add_patch(Rectangle((x - 2.2, y - 1.5), 2.2, 3.0, fc=PAPER, ec=GRAY, lw=0.45, zorder=3))
-    _text(ax, x - 3.2, y + 2.4, label, size=5.2, color=GRAY, ha="right")
+    ax.add_patch(Rectangle((x - 2.0, y - 1.35), 2.0, 2.7, fc="white", ec=GRAY, lw=0.45,
+                           zorder=3))
+    _text(ax, x - 3.4, y + 2.0, label, size=5.0, color=GRAY, ha="right")
+
+
+def _drive(ax, x, y, label, color, *, w=18.5, h=4.6, ink=None):
+    """A drive plugged into the port at (x, y): metal plug, then the coloured body."""
+    ax.add_patch(Rectangle((x, y - 1.05), 2.3, 2.1, fc="#E6E6E6", ec=GRAY, lw=0.4, zorder=4))
+    _box(ax, x + 2.3, y - h / 2, w, h, fc=color, ec=color, lw=0.4, r=1.1, z=4)
+    _text(ax, x + 2.3 + w / 2, y, label, size=5.8, weight="bold", color=ink or text_on(color))
 
 
 # -- figure: test rig -------------------------------------------------------------------------
@@ -118,190 +134,169 @@ DEFAULT_RIG = {
 
 
 def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
-    """Panel a: physical layout of hosts, hubs, drives and probes. Panel b: data path."""
+    """Panel a: hosts, hubs and drives as wired. Panel b: path of the data to the workbook."""
     rig = rig or DEFAULT_RIG
-    fig, ax = _canvas(182, 88)
+    fig, ax = _canvas(182, 76)
 
     # ---------------- panel a: physical rig ----------------
-    _text(ax, 1.5, 85.5, "a", size=8, weight="bold", ha="left")
-    _section(ax, 6, 85.5, "Host computers")
-    _section(ax, 57, 85.5, "Hubs")
-    _section(ax, 93, 85.5, "Drives under test")
+    _panel(ax, 0.5, 73.0, "a")
+    _section(ax, 5, 73.0, "Hosts")
+    _section(ax, 57, 73.0, "Hubs")
+    _section(ax, 85, 73.0, "Drives under test")
+    rows = {"W-direct": (66.0, 60.5, 55.0), "W-dockA": (45.0, 39.5, 34.0),
+            "M-dockB": (23.0, 17.5, 12.0)}
+    port_x = 87.0
 
-    rows = {"W-direct": (78.0, 72.0, 66.0), "W-dockA": (56.0, 50.0, 44.0),
-            "M-dockB": (30.0, 24.0, 18.0)}
-    port_x, stick_x = 90.0, 90.0
+    _host(ax, 4, 36, 42, 22, "Host W", "Windows desktop",
+          ("flashrel supervisor", "6 drive workers, one process each"), _monitor)
+    _host(ax, 4, 7, 42, 22, "Host M", "MacBook",
+          ("flashrel supervisor", "3 drive workers, one process each"), _laptop)
 
-    # Host W
-    _box(ax, 4, 52, 40, 24, fc="white")
-    _monitor(ax, 34, 66.5, 1.0)
-    _text(ax, 7, 72.2, "Host W", size=7.4, weight="bold", ha="left")
-    _text(ax, 7, 68.4, "Windows 11 desktop", size=6, color=GRAY, ha="left")
-    _poly(ax, [(7, 65.6), (41, 65.6)], color=HAIRLINE, lw=0.5)
-    _text(ax, 7, 62.2, "flashrel supervisor", size=5.9, ha="left")
-    _text(ax, 7, 58.9, "6 drive workers (1 process each)", size=5.9, ha="left")
-    _text(ax, 7, 55.6, "3 rear-panel USB ports + dock A", size=5.9, ha="left")
-
-    # Host M
-    _box(ax, 4, 12, 40, 24, fc="white")
-    _laptop(ax, 34, 27.5, 1.0)
-    _text(ax, 7, 32.2, "Host M", size=7.4, weight="bold", ha="left")
-    _text(ax, 7, 28.4, "macOS laptop", size=6, color=GRAY, ha="left")
-    _poly(ax, [(7, 25.6), (41, 25.6)], color=HAIRLINE, lw=0.5)
-    _text(ax, 7, 22.2, "flashrel supervisor", size=5.9, ha="left")
-    _text(ax, 7, 18.9, "3 drive workers", size=5.9, ha="left")
-    _text(ax, 7, 15.6, "USB-C dock B", size=5.9, ha="left")
-
-    # Arduino temperature logger (between the hosts)
-    _box(ax, 4, 39.5, 40, 9.5, fc=PAPER, ec=MIST)
-    _text(ax, 7, 46.0, "Arduino + DS18B20 probes", size=5.9, weight="bold", ha="left")
-    _text(ax, 7, 42.6, "10 probes · every 10 s · USB serial to W", size=5.5,
-          color=GRAY, ha="left")
-    _poly(ax, [(24, 49), (24, 52)], lw=0.5)
-
-    # Host W -> rear ports (bus at x = 50)
-    _poly(ax, [(44, 70), (50, 70)])
-    _poly(ax, [(50, rows["W-direct"][0]), (50, rows["W-direct"][-1])])
+    # host W -> its rear-panel ports (one bus)
+    bus_x = 52.0
+    _poly(ax, [(46, 55.0), (bus_x, 55.0)])
+    _poly(ax, [(bus_x, rows["W-direct"][-1]), (bus_x, rows["W-direct"][0])])
     for y in rows["W-direct"]:
-        _poly(ax, [(50, y), (port_x - 2.2, y)])
-    _text(ax, 66, 81.2, "rear-panel ports", size=5.4, color=GRAY, style="italic")
+        _poly(ax, [(bus_x, y), (port_x - 2.0, y)])
+    _text(ax, 66, 68.8, "rear-panel ports", size=5.2, color=GRAY, style="italic")
 
-    # Host W -> dock A, Host M -> dock B
-    for (dock, label, sub), host_y, ys in (
-            (("Dock A", "USB hub", "3 ports"), 58.0, rows["W-dockA"]),
-            (("Dock B", "USB-C hub", "3 ports"), 24.0, rows["M-dockB"])):
-        y0, y1 = min(ys) - 4.5, max(ys) + 4.5
-        _box(ax, 58, y0, 18, y1 - y0, fc=PAPER, ec=INK)
-        _text(ax, 67, (y0 + y1) / 2 + 3.2, dock, size=6.6, weight="bold")
-        _text(ax, 67, (y0 + y1) / 2 - 0.4, label, size=5.4, color=GRAY)
-        _text(ax, 67, (y0 + y1) / 2 - 3.6, sub, size=5.4, color=GRAY)
+    # host -> dock -> ports
+    for (name, kind), ys in ((("Dock A", "USB hub · 3 ports"), rows["W-dockA"]),
+                             (("Dock B", "USB-C hub · 3 ports"), rows["M-dockB"])):
+        y0, y1 = min(ys) - 4.4, max(ys) + 4.4
         mid = (y0 + y1) / 2
-        _poly(ax, [(44, host_y), (51, host_y), (51, mid), (58, mid)] if host_y != mid
-              else [(44, mid), (58, mid)])
+        _box(ax, 58, y0, 17, y1 - y0, fc=PAPER)
+        _text(ax, 66.5, mid + 1.9, name, size=6.4, weight="bold")
+        _text(ax, 66.5, mid - 1.9, kind, size=5.0, color=GRAY)
+        _poly(ax, [(46, mid), (58, mid)])
         for y in ys:
-            _poly(ax, [(76, y), (port_x - 2.2, y)])
+            _poly(ax, [(75, y), (port_x - 2.0, y)])
 
-    # Ports and drives
     for key, ys in rows.items():
         for y, d in zip(ys, rig[key]):
             _port(ax, port_x, y, d.port)
-            _usb_stick(ax, stick_x, y, d.drive_id, GROUP_COLORS[d.group])
+            _drive(ax, port_x, y, d.drive_id, GROUP_COLORS[d.group])
 
-    # Reference drive for port checks
-    _port(ax, port_x, 8.0, "W4")
-    _usb_stick(ax, stick_x, 8.0, "REF", MIST, probe=False)
-    _text(ax, 112.5, 8.0, "spare port W4 and\nreference drive (F5)", size=5.3, color=GRAY,
-          ha="left")
+    # spare port and reference drive, used only for port checks
+    _port(ax, port_x, 3.8, "W4")
+    _drive(ax, port_x, 3.8, "REF", REF_FILL, ink=INK)
+    _text(ax, 110.5, 3.8, "spare port on host W;\nreference drive for port checks (F5)",
+          size=5.0, color=GRAY, ha="left")
 
-    # Legend
-    lx, ly = 4.0, 4.6
+    # legend
     for i, g in enumerate(("S8", "A8", "A16")):
-        x = lx + i * 26.0
-        _box(ax, x, ly - 1.6, 5.0, 3.2, fc=GROUP_COLORS[g], ec=GROUP_COLORS[g], r=0.8)
-        _text(ax, x + 6.4, ly, GROUP_LABELS[g], size=5.6, ha="left")
-    ax.plot(lx + 78.6, ly, marker="o", ms=2.3, mfc=INK, mec="white", mew=0.4)
-    _text(ax, lx + 80.4, ly, "probe", size=5.6, ha="left")
+        x = 4.0 + i * 24.0
+        _box(ax, x, 2.3, 4.6, 3.0, fc=GROUP_COLORS[g], ec=GROUP_COLORS[g], r=0.7)
+        _text(ax, x + 6.0, 3.8, GROUP_LABELS[g], size=5.6, ha="left")
 
     # ---------------- panel b: data path ----------------
-    bx = 132.0
-    _text(ax, bx - 3.5, 85.5, "b", size=8, weight="bold", ha="left")
-    _section(ax, bx, 85.5, "Data path")
+    _panel(ax, 128.5, 73.0, "b")
+    _section(ax, 133, 73.0, "Data path")
     steps = [
-        ("Drive workers", "one cycle at a time per drive"),
+        ("Drive workers", "one process per drive, on both hosts"),
         ("Local logs", "cycles.csv · events.jsonl · state.json"),
-        ("Shared folder", "both hosts + temperature log"),
-        ("flashrel analyze / export", "life table, fits, figures"),
-        ("Excel workbook", "by brand, capacity, file size"),
+        ("Shared folder", "synced between the hosts; daily backup"),
+        ("flashrel analyze", "life table, model fits, figures"),
+        ("Excel workbook", "sheets by brand, capacity, and file size"),
     ]
-    h, gap, top = 10.8, 4.6, 80.0
+    spine_x, top, step = 135.0, 64.5, 12.6
     for i, (title, sub) in enumerate(steps):
-        y = top - i * (h + gap)
+        y = top - i * step
         last = i == len(steps) - 1
-        _box(ax, bx, y - h, 46, h, fc=PAPER if not last else "white",
-             ec=DATA if last else INK, lw=0.8 if last else 0.6)
-        _text(ax, bx + 23, y - h / 2 + 2.0, title, size=6.3, weight="bold")
-        _text(ax, bx + 23, y - h / 2 - 2.0, sub, size=5.4, color=GRAY)
+        ax.add_patch(Circle((spine_x, y), 1.35, fc=DATA if last else "white", ec=DATA, lw=0.8,
+                            zorder=4))
+        _text(ax, spine_x + 4.0, y + 1.7, title, size=6.4, weight="bold", ha="left")
+        _text(ax, spine_x + 4.0, y - 2.0, sub, size=5.3, color=GRAY, ha="left")
         if not last:
-            _arrow(ax, (bx + 23, y - h), (bx + 23, y - h - gap), color=DATA, lw=0.7)
+            _arrow(ax, (spine_x, y - 1.35), (spine_x, y - step + 1.35), color=DATA, lw=0.8)
     return fig
 
 
 # -- figure: test cycle and failure handling -------------------------------------------------
 def cycle_flowchart():
+    """One cycle (top row) and what happens when a phase fails (bottom rows)."""
     fig, ax = _canvas(182, 76)
-    dash = (0, (2.5, 1.5))
-    _section(ax, 4, 73.5, "One test cycle, repeated until the drive fails or the test stops")
+    dash = (0, (2.4, 1.6))
+    _section(ax, 3, 73.5, "One test cycle, repeated until the drive fails or the test stops")
+
     main = [
-        ("Locate drive", "by identity file,\nnot drive letter"),
-        ("Plan cycle k", "workload = rotation(k)\nfill 90 % of free space"),
-        ("Write", "host → drive\nflush every file"),
-        ("Read back", "drive → host, bypass\ncache, compare bytes"),
-        ("Delete", "remove files, check\nspace is returned"),
-        ("Log and assess", "cycle record, D1 slowdown,\nD3 transient errors"),
+        ("Locate drive", "by its identity file,\nnot its drive letter"),
+        ("Plan cycle k", "workload from the rotation;\nfill 90 % of free space"),
+        ("Write", "host → drive;\nflush every file"),
+        ("Read back", "drive → host around the\ncache; compare bytes"),
+        ("Delete", "remove the files; check\nthe space comes back"),
+        ("Log and assess", "cycle record; slowdown (D1),\ntransient errors (D3)"),
     ]
-    w, h, gap, x0, y0 = 25.3, 15.0, 4.04, 4.0, 49.0
+    w, h, gap, x0, y0 = 26.0, 14.0, 3.6, 3.0, 49.0
     centers = []
     for i, (title, sub) in enumerate(main):
         x = x0 + i * (w + gap)
-        _box(ax, x, y0, w, h, fc=PAPER if i in (2, 3, 4) else "white")
-        _text(ax, x + w / 2, y0 + h - 4.0, title, size=6.6, weight="bold")
-        _text(ax, x + w / 2, y0 + 4.8, sub, size=5.4, color=GRAY)
+        timed = i in (2, 3, 4)
+        _box(ax, x, y0, w, h, fc=IO_FILL if timed else "white", ec=IO_EDGE if timed else EDGE)
+        _text(ax, x + w / 2, y0 + h - 3.6, title, size=6.5, weight="bold")
+        _text(ax, x + w / 2, y0 + 4.4, sub, size=5.3, color=GRAY)
         centers.append(x + w / 2)
         if i:
             _arrow(ax, (x - gap, y0 + h / 2), (x, y0 + h / 2))
-    loop_y = y0 + h + 4.5
-    _poly(ax, [(centers[-1], y0 + h), (centers[-1], loop_y), (centers[0], loop_y)])
+    loop_y = y0 + h + 4.2
+    _poly(ax, [(centers[-1], y0 + h), (centers[-1], loop_y), (centers[0], loop_y)], color=INK)
     _arrow(ax, (centers[0], loop_y), (centers[0], y0 + h))
-    _text(ax, (centers[0] + centers[-1]) / 2, loop_y + 2.1, "pass: next cycle, k + 1",
-          size=5.8, color=GRAY)
+    _text(ax, (centers[0] + centers[-1]) / 2, loop_y + 1.9, "pass: next cycle, k + 1",
+          size=5.6, color=GRAY)
 
-    # failure path: from write, read back and delete down to the retry box
-    bus_y, y1, h1 = 43.0, 17.0, 20.0
-    retry_cx = 15.0
+    # failure path from the timed phases down to the retry box
+    bus_y, y1, h1 = 43.0, 21.0, 15.0
+    retry_cx = 14.5
     for i in (2, 3, 4):
         _poly(ax, [(centers[i], y0), (centers[i], bus_y)], color=FAIL, ls=dash)
     _poly(ax, [(centers[4], bus_y), (retry_cx, bus_y)], color=FAIL, ls=dash)
     _arrow(ax, (retry_cx, bus_y), (retry_cx, y1 + h1), color=FAIL, ls=dash)
-    _text(ax, 47.0, bus_y + 1.9, "I/O error, data mismatch or disconnect", size=5.5,
-          color=FAIL)
+    _text(ax, 44.0, bus_y + 1.8, "I/O error, data mismatch, or disconnect", size=5.4, color=FAIL)
 
-    def step(x, w_, title, sub, ec, fc="white"):
+    def step(x, w_, title, sub, fc, ec):
         _box(ax, x, y1, w_, h1, fc=fc, ec=ec)
-        _text(ax, x + w_ / 2, y1 + h1 - 4.2, title, size=6.6, weight="bold")
-        _text(ax, x + w_ / 2, y1 + 7.4, sub, size=5.4, color=GRAY)
+        _text(ax, x + w_ / 2, y1 + h1 - 3.6, title, size=6.5, weight="bold")
+        _text(ax, x + w_ / 2, y1 + 5.2, sub, size=5.3, color=GRAY)
 
-    step(4, 22, "Retry × 2", "cleared → D3\ntransient error;\ncycle continues", FAIL)
-    step(35, 23, "Cycle failure", "log F1–F4 or F6\nwith chunk-level\ndiagnosis", FAIL)
-    step(64, 36, "Automatic recovery check", "1 wait ≤ 120 s to re-enumerate\n"
-         "2 test for a read-only lock\n3 write, verify, delete 64 MiB", INK, PAPER)
-    _arrow(ax, (26, y1 + h1 / 2), (35, y1 + h1 / 2), color=FAIL)
-    _text(ax, 30.5, y1 + h1 / 2 + 1.9, "persists", size=5.0, color=FAIL)
-    _arrow(ax, (58, y1 + h1 / 2), (64, y1 + h1 / 2), color=FAIL)
+    step(3, 23, "Retry, twice", "clears: transient\nerror (D3), cycle\ncontinues", FAIL_FILL,
+         FAIL_EDGE)
+    step(33, 24, "Cycle failure", "logged as F1–F4 or\nF6, with the kind\nof corruption",
+         FAIL_FILL, FAIL_EDGE)
+    step(64, 36, "Automatic recovery check", "wait ≤ 120 s for the drive;\n"
+         "test for a read-only lock;\nwrite, verify, delete 64 MiB", "white", EDGE)
+    _arrow(ax, (26, y1 + h1 / 2), (33, y1 + h1 / 2), color=FAIL)
+    _text(ax, 29.5, y1 + h1 / 2 + 1.8, "persists", size=5.0, color=FAIL)
+    _arrow(ax, (57, y1 + h1 / 2), (64, y1 + h1 / 2), color=FAIL)
 
-    def pill(x, y, w_, title, sub, ec):
-        _box(ax, x, y, w_, 12.0, fc="white", ec=ec, lw=0.8, r=2.0)
-        _text(ax, x + w_ / 2, y + 8.4, title, size=6.1, weight="bold", color=ec)
-        _text(ax, x + w_ / 2, y + 3.6, sub, size=5.2, color=GRAY)
+    def outcome(x, y, w_, title, sub, fc, ec, title_color=INK):
+        _box(ax, x, y, w_, 11.5, fc=fc, ec=ec, r=1.6)
+        _text(ax, x + w_ / 2, y + 7.9, title, size=6.2, weight="bold", color=title_color)
+        _text(ax, x + w_ / 2, y + 3.4, sub, size=5.2, color=GRAY)
 
-    pill(109, 28, 32, "Soft failure (D2)", "drive keeps cycling;\nintermittent event logged", PASS)
-    pill(109, 11, 32, "Operator re-check", "re-plug into the spare port;\nreformat if needed", INK)
-    pill(149, 28, 30, "Port fault (F5)", "reference drive fails the\nold port: not counted", GRAY)
-    pill(149, 11, 30, "Hard failure", "fails again:\nlife T = k, retire", FAIL)
-    _arrow(ax, (100, 33.0), (109, 34.0), color=PASS)
-    _text(ax, 104.5, 35.6, "pass", size=5.2, color=PASS)
-    _arrow(ax, (100, 21.0), (109, 17.0), color=INK)
-    _text(ax, 104.5, 16.2, "fail", size=5.2, color=INK)
-    _arrow(ax, (125, 23.0), (125, 28.0), color=PASS)
-    _text(ax, 126.4, 25.5, "passes", size=5.0, color=PASS, ha="left")
-    _arrow(ax, (141, 34.0), (149, 34.0), color=GRAY)
-    _arrow(ax, (141, 17.0), (149, 17.0), color=FAIL)
+    top, bottom = 27.5, 8.5   # lower edges of the two rows of outcomes
+    outcome(108, top, 32, "Soft failure (D2)", "drive keeps cycling;\nevent is logged",
+            PASS_FILL, PASS_EDGE, PASS)
+    outcome(108, bottom, 32, "Operator re-check",
+            "drive moved to the spare\nport; reformat if needed", "white", EDGE)
+    outcome(148, top, 31, "Port fault (F5)", "reference drive also fails\nthe port: not counted",
+            PAPER, EDGE, GRAY)
+    outcome(148, bottom, 31, "Hard failure", "fails again: life T = k;\ndrive is retired",
+            FAIL_FILL, FAIL_EDGE, FAIL)
+    _arrow(ax, (100, 32.0), (108, top + 5.75), color=PASS)
+    _text(ax, 103.8, 35.4, "pass", size=5.0, color=PASS)
+    _arrow(ax, (100, 25.0), (108, bottom + 5.75), color=INK)
+    _text(ax, 102.8, 18.6, "fail", size=5.0, color=INK)
+    _arrow(ax, (124, bottom + 11.5), (124, top), color=PASS)
+    _text(ax, 125.2, (bottom + 11.5 + top) / 2, "passes", size=5.0, color=PASS, ha="left")
+    _arrow(ax, (140, top + 5.75), (148, top + 5.75), color=GRAY)
+    _arrow(ax, (140, bottom + 5.75), (148, bottom + 5.75), color=FAIL)
 
-    _text(ax, 4, 6.4, "Also a hard failure: 3 cycle failures within 10 cycles (intermittent "
-                      "limit), a persistent read-only lock, or a change in reported capacity.",
-          size=5.6, color=GRAY, ha="left")
-    _text(ax, 4, 2.2, "F1 corruption · F2 I/O error · F3 disconnect or hang · "
-                      "F4 read-only · F5 port or host fault · F6 file-system fault",
-          size=5.6, color=INK, ha="left")
+    _text(ax, 3, 4.6, "Also a hard failure: three cycle failures within ten cycles, a persistent "
+                      "read-only lock, or a change in the reported capacity.",
+          size=5.4, color=GRAY, ha="left")
+    _text(ax, 3, 1.2, "F1 corruption · F2 I/O error · F3 disconnect or hang · F4 read-only · "
+                      "F5 port or host fault · F6 file-system fault",
+          size=5.4, color=INK, ha="left")
     return fig
 
 
@@ -309,58 +304,89 @@ def cycle_flowchart():
 @dataclass(frozen=True)
 class Task:
     name: str
-    start: date
-    end: date
+    start: datetime
+    end: datetime
     owner: str
-    stream: str  # "prep", "test", "analysis"
+    stream: str                       # key of STREAM_COLORS
+    marks: tuple[datetime, ...] = ()  # point events (drawn as dots) instead of a bar
 
 
 @dataclass(frozen=True)
 class Milestone:
     name: str
-    day: date
+    when: datetime
+    align: str = "center"             # label alignment, to keep close labels apart
 
 
-STREAM_COLORS = {"prep": "#A9C0D3", "test": "#2B5C8A", "monitor": "#7FA3C4",
-                 "analysis": "#D9973F"}
-STREAM_LABELS = {"prep": "preparation", "test": "testing", "monitor": "monitoring",
-                 "analysis": "analysis and reporting"}
+STREAM_COLORS = {"prep": "#A9C0D3", "test": "#2B5C8A", "check": "#2B5C8A",
+                 "report": "#D9973F"}
+STREAM_LABELS = {"prep": "preparation", "test": "testing (unattended)",
+                 "check": "daily status check", "report": "analysis and slides"}
+WEEKEND = "#F5F5F3"
 
 
-def schedule_figure(tasks: Sequence[Task], milestones: Sequence[Milestone], start: date,
-                    end: date, today: date | None = None):
+def schedule_figure(tasks: Sequence[Task], milestones: Sequence[Milestone], start: datetime,
+                    end: datetime):
+    """Gantt chart on a one-day grid; weekends shaded; bars at hour resolution."""
+    def x(t: datetime) -> float:
+        return (t - start).total_seconds() / 86400.0
+
     n = len(tasks)
-    fig = plt.figure(figsize=(PAGE_W, 0.17 * n + 0.75))
-    ax = fig.add_axes((0.27, 0.14, 0.70, 0.80))
+    days = int(round(x(end)))
+    fig = plt.figure(figsize=(PAGE_W, 0.2 * n + 0.95))
+    ax = fig.add_axes((0.24, 0.17, 0.74, 0.62))
+
+    for k in range(days):
+        day = start + timedelta(days=k)
+        if day.weekday() >= 5:
+            ax.axvspan(k, k + 1, color=WEEKEND, lw=0, zorder=0)
+        ax.axvline(k, color=HAIRLINE, lw=0.35, zorder=0.5)
     for i, task in enumerate(tasks):
         y = n - 1 - i
-        ax.barh(y, (task.end - task.start).days + 1, left=(task.start - start).days, height=0.56,
-                color=STREAM_COLORS[task.stream], edgecolor="none", zorder=2)
-        ax.text((task.end - start).days + 1.6, y, task.owner, va="center", fontsize=5.6,
-                color=GRAY)
+        color = STREAM_COLORS[task.stream]
+        if task.marks:
+            ax.plot([x(t) for t in task.marks], [y] * len(task.marks), ls="none", marker="o",
+                    ms=2.6, color=color, zorder=3)
+            tail = max(x(t) for t in task.marks)
+        else:
+            ax.barh(y, x(task.end) - x(task.start), left=x(task.start), height=0.5,
+                    color=color, edgecolor="none", zorder=2)
+            tail = x(task.end)
+        ax.text(tail + 0.18, y, task.owner, va="center", ha="left", fontsize=5.5, color=GRAY)
     for m in milestones:
-        x = (m.day - start).days + 0.5
-        ax.axvline(x, color=HAIRLINE, lw=0.6, zorder=1)
-        ax.plot(x, n - 0.25, marker="D", ms=3.6, color=FAIL, zorder=3, clip_on=False)
-        ax.text(x, n + 0.35, m.name, rotation=0, ha="center", va="bottom", fontsize=5.6,
-                color=FAIL)
-    if today is not None:
-        ax.axvline((today - start).days, color=INK, lw=0.6, ls=(0, (1, 1.5)))
+        mx = x(m.when)
+        ax.plot([mx, mx], [-0.6, n - 0.35], color=FAIL, lw=0.5, alpha=0.4, zorder=1)
+        ax.plot(mx, n - 0.05, marker="D", ms=3.3, color=FAIL, zorder=4, clip_on=False)
+        ax.text(mx, n + 0.45, m.name, ha=m.align, va="bottom", fontsize=5.6, color=FAIL)
+
     ax.set_yticks(range(n))
-    ax.set_yticklabels([t.name for t in reversed(tasks)], fontsize=6.3)
-    ax.tick_params(axis="y", length=0)
-    weeks = []
-    d = start
-    while d <= end:
-        weeks.append(d)
-        d += timedelta(days=7)
-    ax.set_xticks([(w - start).days for w in weeks])
-    ax.set_xticklabels([f"{w.day} {w:%b}" for w in weeks])
-    ax.set_xlim(0, (end - start).days + 1)
-    ax.set_ylim(-0.6, n + 0.2)
-    ax.spines["left"].set_visible(False)
+    ax.set_yticklabels([t.name for t in reversed(tasks)], fontsize=6.2)
+    ax.tick_params(axis="y", length=0, pad=4)
+    ax.set_xticks([k + 0.5 for k in range(days)])
+    ax.set_xticklabels([f"{'MTWTFSS'[(start + timedelta(days=k)).weekday()]}\n"
+                        f"{(start + timedelta(days=k)).day}" for k in range(days)],
+                       fontsize=5.6, linespacing=1.4)
+    ax.tick_params(axis="x", length=0, pad=2.5)
+    for label, k in zip(ax.get_xticklabels(), range(days)):
+        if (start + timedelta(days=k)).weekday() >= 5:
+            label.set_color(GRAY)
+    ax.set_xlim(0, days)
+    ax.set_ylim(-0.6, n - 0.35)
+    for side in ("left", "right", "top"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_linewidth(0.5)
+    ax.text(0.0, -0.36, f"{start:%B %Y}", transform=ax.transAxes, fontsize=5.8, color=GRAY,
+            ha="left", va="top")
+
     streams = [s for s in STREAM_COLORS if any(t.stream == s for t in tasks)]
-    handles = [Rectangle((0, 0), 1, 1, fc=STREAM_COLORS[s], ec="none") for s in streams]
-    ax.legend(handles, [STREAM_LABELS[s] for s in streams], loc="lower left", fontsize=5.8,
-              handlelength=1.4, handleheight=0.8, ncol=2, columnspacing=1.2)
+    handles = []
+    for s in streams:
+        if s == "check":
+            handles.append(plt.Line2D([], [], ls="none", marker="o", ms=2.6,
+                                      color=STREAM_COLORS[s]))
+        else:
+            handles.append(Rectangle((0, 0), 1, 1, fc=STREAM_COLORS[s], ec="none"))
+    ax.legend(handles, [STREAM_LABELS[s] for s in streams], loc="upper right",
+              bbox_to_anchor=(1.0, -0.2), ncol=len(streams), fontsize=5.6, handlelength=1.3,
+              handleheight=0.75, columnspacing=1.4, frameon=False)
     return fig

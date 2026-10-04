@@ -1,10 +1,13 @@
-# Temperature logger
+# Temperature logger (optional)
+
+The fall 2026 test does not use it: temperature is not measured there. For a longer
+test, the harness can log housing temperatures as follows.
 
 USB flash drives report no temperature, so each drive housing carries a DS18B20
-digital probe, plus one probe in free air per host. An Arduino Uno (the department's
-kits) reads all probes on one 1-Wire bus and prints one line per probe every 10 s:
+digital probe, plus one probe in free air per host. An Arduino Uno reads all probes
+on one 1-Wire bus and prints one line per probe every 10 s:
 
-```
+```text
 28FF4A1B6C1403C1,31.25
 ```
 
@@ -27,7 +30,7 @@ housing with Kapton tape; keep the ambient probe away from the drives and hubs.
    code warms up. Record the mapping in `configs/probes.yaml`
    (see `configs/probes.example.yaml`).
 3. Start the test with the logger attached:
-   `flashrel run configs/phase1.yaml --host W --temperature-port COM5 --probe-map configs/probes.yaml`
+   `flashrel run configs/campaign.yaml --host W --temperature-port COM5 --probe-map configs/probes.yaml`
    (`pip install -e ".[sensors]"` adds pyserial; on macOS the port looks like
    `/dev/cu.usbmodem1101`).
 

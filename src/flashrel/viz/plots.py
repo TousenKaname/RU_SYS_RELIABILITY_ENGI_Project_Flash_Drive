@@ -1,4 +1,4 @@
-"""Data figures: probability plots, reliability curves, degradation, MCF, planning."""
+"""Data figures: probability plots, reliability curves, degradation, MCF."""
 
 from __future__ import annotations
 
@@ -6,14 +6,15 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-from matplotlib.ticker import FixedLocator, NullFormatter, NullLocator
+from matplotlib.ticker import FixedLocator, NullLocator
 
 from flashrel.analysis.nonparametric import kaplan_meier, median_ranks
 from flashrel.analysis.parametric import WeibullFit
-from flashrel.viz.style import FAIL, GRAY, GROUP_COLORS, GROUP_LABELS, GROUP_MARKERS, HAIRLINE, INK
+from flashrel.viz.style import FAIL, GROUP_COLORS, GROUP_LABELS, GROUP_MARKERS, HAIRLINE, INK
 
 WEIBULL_TICKS = (0.01, 0.05, 0.2, 0.5, 0.9, 0.99)
 BAND_ALPHA = 0.10
+BOUND_DASH = (0, (3.0, 1.8))
 
 
 def _w(p):
@@ -24,12 +25,15 @@ def _w(p):
 
 def weibull_probability_plot(ax, groups: Mapping[str, tuple[Sequence[float], Sequence[bool]]],
                              fits: Mapping[str, WeibullFit],
-                             t_range: tuple[float, float] | None = None) -> None:
+                             t_range: tuple[float, float] | None = None,
+                             bounds: Mapping[str, tuple[float, float]] | None = None) -> None:
     """Weibull paper: failures at median ranks, suspensions as ticks, MLE lines.
 
     Each fitted line is drawn only over its own group's data (with a small
     margin), so lines do not suggest knowledge far outside the observations.
-    The horizontal hairline marks 63.2 %, where t equals theta.
+    ``bounds`` maps a group without a fit to (shape, theta lower bound); its
+    Weibayes line is dashed. The horizontal hairline marks 63.2 %, where t
+    equals theta.
     """
     all_t = np.concatenate([np.asarray(t, float) for t, _ in groups.values()])
     lo, hi = t_range or (all_t.min() * 0.6, all_t.max() * 1.6)
@@ -38,13 +42,19 @@ def weibull_probability_plot(ax, groups: Mapping[str, tuple[Sequence[float], Seq
         ranks = median_ranks(t, d)
         ax.plot(ranks["time"], _w(ranks["F"]), ls="none", marker=GROUP_MARKERS.get(g, "o"),
                 mfc="white", mec=color, mew=0.8, ms=3.4, zorder=3)
+        tt = np.asarray(t, float)
+        grid = np.geomspace(max(lo, tt.min() * 0.7), min(hi, tt.max() * 1.5), 120)
         if g in fits:
             f = fits[g]
-            tt = np.asarray(t, float)
-            grid = np.geomspace(max(lo, tt.min() * 0.7), min(hi, tt.max() * 1.5), 120)
             ax.plot(grid, _w(f.cdf(grid)), color=color, lw=1.0, zorder=2,
                     label=f"{GROUP_LABELS.get(g, g)}  ($\\gamma$={f.shape:.1f}, "
                           f"$\\theta$={f.scale:,.0f})")
+        elif bounds and g in bounds:
+            shape, theta_lower = bounds[g]
+            grid = np.geomspace(max(lo, tt.min() * 0.25), min(hi, theta_lower * 1.8), 120)
+            cdf = 1.0 - np.exp(-(grid / theta_lower) ** shape)
+            ax.plot(grid, _w(cdf), color=color, lw=0.9, ls=BOUND_DASH, zorder=2,
+                    label=f"{GROUP_LABELS.get(g, g)}  ($\\theta \\geq$ {theta_lower:,.0f})")
         susp = np.asarray(t, float)[~np.asarray(d, bool)]
         if susp.size:
             ax.plot(susp, np.full(susp.size, _w(0.0035)), ls="none", marker="|", ms=4,
@@ -118,8 +128,8 @@ def degradation_plot(ax, paths: pd.DataFrame, fits: pd.DataFrame, threshold: flo
                     zorder=4)
             x_max = max(x_max, end)
     ax.axhline(threshold, color=FAIL, lw=0.6, ls=(0, (1, 1.5)))
-    ax.text(0.98, threshold - 0.04, f"{threshold:.0%} threshold", transform=ax.get_yaxis_transform(),
-            color=FAIL, fontsize=5.6, ha="right", va="top")
+    ax.text(0.98, threshold + 0.03, f"{threshold:.0%} threshold", transform=ax.get_yaxis_transform(),
+            color=FAIL, fontsize=5.6, ha="right", va="bottom")
     ax.set_ylim(0, 1.25)
     ax.set_xlim(0, x_max * 1.05 if x_max else None)
     ax.set_xlabel("Cycles")
@@ -142,46 +152,3 @@ def mcf_plot(ax, curves: Mapping[str, pd.DataFrame]) -> None:
     ax.set_xlabel("Cycles")
     ax.set_ylabel("Mean cumulative soft failures")
     ax.legend(loc="upper left", fontsize=6)
-
-
-def cycles_per_day_plot(ax, write_speeds: np.ndarray, series: Mapping[str, np.ndarray],
-                        styles: Mapping[str, dict], band: tuple[float, float]) -> None:
-    ax.axvspan(*band, color=HAIRLINE, alpha=0.6, lw=0)
-    for name, y in series.items():
-        ax.plot(write_speeds, y, label=name, **styles.get(name, {}))
-    ax.set_xlim(write_speeds.min(), write_speeds.max())
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("Sustained write speed (MB/s)")
-    ax.set_ylabel("Full-fill cycles per day")
-    ax.legend(loc="upper left", fontsize=6)
-
-
-def expected_failures_plot(ax, theta: np.ndarray, curves: Mapping[str, np.ndarray],
-                           styles: Mapping[str, dict], marks: Sequence[float] = ()) -> None:
-    for name, y in curves.items():
-        ax.plot(theta, y, label=name, **styles.get(name, {}))
-    for m in marks:
-        ax.axvline(m, color=GRAY, lw=0.5, ls=(0, (2, 2)))
-    ax.set_xscale("log")
-    ax.set_xlabel(r"Characteristic life $\theta$ (cycles)")
-    ax.set_ylabel("Expected hard failures by 1 Dec")
-    ax.set_ylim(bottom=0)
-    ax.xaxis.set_minor_formatter(NullFormatter())
-    ax.legend(loc="upper right", fontsize=6)
-
-
-def units_needed_plot(ax, p: np.ndarray, n_needed: np.ndarray, r: int,
-                      reference: Sequence[tuple[float, str]] = ()) -> None:
-    ax.step(p, n_needed, where="mid", color=INK, lw=1.0)
-    ax.axhline(r, color=GRAY, lw=0.5, ls=(0, (2, 2)))
-    ax.text(p.min() + 0.01, r - 2.0, f"{r} drives (every drive fails)", color=GRAY,
-            fontsize=5.6, ha="left", va="top")
-    for x, label in reference:
-        y = float(np.interp(x, p, n_needed))
-        ax.plot(x, y, marker="o", ms=3, mfc="white", mec=FAIL, mew=0.8, zorder=3)
-        ax.annotate(label, (x, y), xytext=(4, 4), textcoords="offset points", fontsize=5.8,
-                    color=FAIL)
-    ax.set_xlim(p.min(), p.max())
-    ax.set_ylim(0, min(150, float(n_needed.max()) * 1.05))
-    ax.set_xlabel("Probability a drive fails by 1 Dec, $F(\\tau)$")
-    ax.set_ylabel(f"Drives for {r} failures (90 % assurance)")

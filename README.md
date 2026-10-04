@@ -19,17 +19,21 @@ the companion report repository (`Project/`).
 The harness needs only Python ≥ 3.10 and PyYAML, so it runs on Windows, macOS and Linux
 (including a Raspberry Pi). The analysis adds NumPy, SciPy, pandas, Matplotlib and openpyxl.
 
+The fall 2026 test runs nine drives from 6 October, 09:00, to 18 October, 09:00, after a
+two-drive pilot that starts on the evening of 5 October; [`docs/operator_guide.md`](docs/operator_guide.md)
+has the day-by-day steps.
+
 ## Quick start
 
 ```bash
-pip install -e ".[analysis]"          # add ,sensors for the Arduino thermometer, ,dev for tests
+pip install -e ".[analysis]"          # add ,dev for the tests
 
 flashrel selftest                     # cache bypass + fault detection work on this computer?
-flashrel enroll configs/phase1.yaml --drive A8-03 --mount E:\     # once per drive (exFAT, empty)
-flashrel run configs/phase1.yaml --host W                         # all drives assigned to host W
-flashrel status configs/phase1.yaml                               # progress of every drive
-flashrel export configs/phase1.yaml --out data/phase1.xlsx        # Excel workbook
-flashrel analyze configs/phase1.yaml --out reports/phase1         # fits, tables, figures
+flashrel enroll configs/campaign.yaml --drive A8-03 --mount E:\   # once per drive (exFAT, empty)
+flashrel run configs/campaign.yaml --host W                       # all drives assigned to host W
+flashrel status configs/campaign.yaml                             # progress of every drive
+flashrel export configs/campaign.yaml --out data/fall2026.xlsx    # Excel workbook
+flashrel analyze configs/campaign.yaml --out reports/fall2026     # fits, tables, figures
 ```
 
 On macOS use the volume path as the mount, e.g. `--mount /Volumes/A8-03`. `run` keeps the
@@ -72,7 +76,7 @@ read-only, changes capacity, or has 3 cycle failures within 10 cycles. See
 ## Repository layout
 
 ```text
-configs/            inventory.yaml (drives), phase1.yaml (campaign), probes.example.yaml
+configs/            inventory.yaml (drives), campaign.yaml (the test), probes.example.yaml
 src/flashrel/       the package
   config.py         campaign YAML -> validated dataclasses
   inventory.py      drive groups and unit IDs
@@ -83,15 +87,15 @@ src/flashrel/       the package
   recorder.py       append-only CSV / JSON Lines logs, resumable state, drive locks
   runner.py         per-drive worker, recovery protocol, supervisor, hang watchdog
   intake.py         enrollment and capacity (counterfeit) screening
-  sensors.py        temperature sources (Arduino over serial)
+  sensors.py        optional temperature sources (Arduino over serial)
   system/           OS layer: cache-bypassing I/O, volume discovery, error mapping, sleep
   analysis/         life data, nonparametric, parametric, regression, per-cycle hazard,
                     degradation, attribution, planning, simulation, export, report
   viz/              figure style, data plots, schematic diagrams
 scripts/            make_plan_figures.py, make_plan_tables.py, planning_assumptions.py
-hardware/arduino/   DS18B20 temperature logger sketch
+hardware/arduino/   optional DS18B20 temperature logger sketch
 docs/               operator guide
-tests/              68 tests, including end-to-end cycles with injected faults
+tests/              70 tests, including end-to-end cycles with injected faults
 ```
 
 Each drive's logs live in `<data_dir>/<campaign>/<drive>/`: `cycles.csv` (one row per
@@ -113,7 +117,7 @@ IEEE text width so LaTeX places them at 1:1 scale. The tables are generated from
 YAML files the harness runs on. Planning speeds are in `scripts/planning_assumptions.py`;
 replace them with the pilot's measurements and regenerate.
 
-`flashrel simulate configs/phase1.yaml --out data-sim` writes synthetic logs (made-up
+`flashrel simulate configs/campaign.yaml --out data-sim` writes synthetic logs (made-up
 parameters, clearly not measurements) to rehearse the whole analysis before real data exist.
 
 ## Development

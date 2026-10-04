@@ -26,6 +26,9 @@ from flashrel.config import Campaign
 from flashrel.failure import DriveState, DriveStatus, Event, EventType
 from flashrel.recorder import CYCLE_FIELDS, DriveLog
 
+#: All nine drives start on 6 Oct 2026 at 09:00 EDT; logs keep UTC, like the harness.
+TEST_START = datetime(2026, 10, 6, 13, 0, tzinfo=timezone.utc)
+
 
 @dataclass(frozen=True)
 class GroupTruth:
@@ -39,15 +42,14 @@ class GroupTruth:
     noise_sd: float = 0.04
 
 
-#: Rehearsal values only (not measurements).
+#: Rehearsal values only (not measurements). The lives are short enough that a
+#: twelve-day rehearsal exercises every step: fits, bounds, slowdowns, recurrences.
 REHEARSAL_TRUTH: dict[str, GroupTruth] = {
-    "S8": GroupTruth(2.6, 1500.0, {"small": 1.1, "medium": 6.0, "large": 6.4},
+    "S8": GroupTruth(2.6, 700.0, {"small": 1.1, "medium": 6.0, "large": 6.4},
                      {"small": 7.0, "medium": 19.0, "large": 20.0}),
-    "S16": GroupTruth(2.6, 1300.0, {"small": 1.1, "medium": 6.0, "large": 6.4},
-                      {"small": 7.0, "medium": 19.0, "large": 20.0}),
-    "A8": GroupTruth(2.0, 650.0, {"small": 0.8, "medium": 8.0, "large": 9.0},
+    "A8": GroupTruth(2.0, 230.0, {"small": 0.8, "medium": 8.0, "large": 9.0},
                      {"small": 6.0, "medium": 17.0, "large": 18.0}),
-    "A16": GroupTruth(2.0, 520.0, {"small": 0.8, "medium": 8.0, "large": 9.0},
+    "A16": GroupTruth(2.0, 160.0, {"small": 0.8, "medium": 8.0, "large": 9.0},
                       {"small": 6.0, "medium": 17.0, "large": 18.0}),
 }
 
@@ -65,11 +67,10 @@ def _soft_failures(rng: np.random.Generator, life: float, truth: GroupTruth, las
 
 def simulate_campaign(campaign: Campaign, horizon: Mapping[str, int], *, seed: int = 1,
                       truth: Mapping[str, GroupTruth] | None = None,
-                      start: datetime | None = None) -> None:
+                      start: datetime = TEST_START) -> None:
     """Write synthetic logs for every assigned drive; ``horizon`` is cycles per group."""
     truth = truth or REHEARSAL_TRUTH
     rng = np.random.default_rng(seed)
-    start = start or datetime(2026, 10, 12, 9, tzinfo=timezone.utc)
     for drive_id, assignment in campaign.assignments.items():
         unit = campaign.inventory[drive_id]
         g = truth[unit.group.code]

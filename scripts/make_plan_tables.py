@@ -1,6 +1,6 @@
 """Generate the data-driven tables of the test plan as LaTeX ``tabular`` bodies.
 
-    python scripts/make_plan_tables.py --config configs/phase1.yaml --out ../Project/tables
+    python scripts/make_plan_tables.py --out ../Project/tables
 
 Each file holds only a ``tabular`` (booktabs rules); captions and labels stay
 in the report text. The numbers come from the same YAML files the harness
@@ -93,7 +93,7 @@ def feasibility_table(c: Campaign) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", default=str(REPO / "configs" / "phase1.yaml"))
+    parser.add_argument("--config", default=str(REPO / "configs" / "campaign.yaml"))
     parser.add_argument("--out", default=str(REPO / "build" / "tables"))
     args = parser.parse_args()
     campaign = load_campaign(args.config)

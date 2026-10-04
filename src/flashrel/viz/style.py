@@ -32,17 +32,15 @@ PASS = "#3F7F5F"     # muted green
 
 GROUP_COLORS = {
     "S8": "#4A7FB0",   # SanDisk 8 GB, mid blue
-    "S16": "#1E4468",  # SanDisk 16 GB, deep blue (Phase 2)
     "A8": "#D9973F",   # ABLAZE 8 GB, light amber
     "A16": "#8C5320",  # ABLAZE 16 GB, dark amber
 }
 GROUP_LABELS = {
     "S8": "SanDisk 8 GB",
-    "S16": "SanDisk 16 GB",
     "A8": "ABLAZE 8 GB",
     "A16": "ABLAZE 16 GB",
 }
-GROUP_MARKERS = {"S8": "o", "S16": "D", "A8": "s", "A16": "^"}
+GROUP_MARKERS = {"S8": "o", "A8": "s", "A16": "^"}
 WORKLOAD_COLORS = {"small": "#9CC9BA", "medium": "#4E9C86", "large": "#1F5F51"}
 
 RC = {

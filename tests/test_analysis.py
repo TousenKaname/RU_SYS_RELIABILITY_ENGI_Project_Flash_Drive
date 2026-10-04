@@ -71,6 +71,19 @@ def test_weibayes_zero_failure_bound():
         fit_weibull_mle([100.0] * 10, [False] * 10)
 
 
+def test_weibayes_bounds_cover_exactly_the_groups_without_a_fit():
+    from flashrel.analysis.report import try_weibull, weibayes_bounds
+
+    worn = 300.0 * rng.weibull(2.0, 12)
+    groups = {"A": (worn, np.ones(12, bool)), "B": (np.full(4, 290.0), np.zeros(4, bool))}
+    fits = {g: f for g, (t, d) in groups.items() if (f := try_weibull(t, d)) is not None}
+    bounds = weibayes_bounds(groups, fits)
+    assert set(fits) == {"A"} and set(bounds) == {"B"}
+    shape, theta_lower = bounds["B"]
+    assert theta_lower == pytest.approx(weibayes_lower_bound(*groups["B"], shape))
+    assert theta_lower > 290.0  # four survivors of 290 cycles push the bound past 290
+
+
 def test_lognormal_and_common_shape_test():
     y = rng.normal(6.0, 0.5, 600)
     ln = fit_lognormal_mle(np.exp(y), np.ones(600, bool))

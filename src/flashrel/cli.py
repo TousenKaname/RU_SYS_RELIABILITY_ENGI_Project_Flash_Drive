@@ -66,7 +66,7 @@ def cmd_enroll(args) -> int:
     try:
         with drive_lock(campaign.name, args.drive):
             record = enroll(Path(args.mount), campaign, args.drive,
-                            capacity_test=not args.skip_capacity_test, force=args.force)
+                            capacity_test=args.capacity_test, force=args.force)
     except DriveBusy:
         raise CommandError(f"{args.drive} is being tested on this host; stop its worker first")
     except EnrollmentError as exc:
@@ -300,15 +300,16 @@ def build_parser() -> argparse.ArgumentParser:
     def add(name, func, help_, config=True):
         sp = sub.add_parser(name, help=help_, description=help_)
         if config:
-            sp.add_argument("config", help="campaign YAML file, e.g. configs/phase1.yaml")
+            sp.add_argument("config", help="campaign YAML file, e.g. configs/campaign.yaml")
         sp.set_defaults(func=func)
         return sp
 
     add("discover", cmd_discover, "list mounted drives that carry an identity file", False)
-    sp = add("enroll", cmd_enroll, "label a drive, screen its capacity, measure its baseline")
+    sp = add("enroll", cmd_enroll, "label a drive for the campaign")
     sp.add_argument("--drive", required=True)
     sp.add_argument("--mount", required=True, help="drive letter or mount point, e.g. E:\\")
-    sp.add_argument("--skip-capacity-test", action="store_true")
+    sp.add_argument("--capacity-test", action="store_true",
+                    help="also fill 99 %% of the drive and read it back (one full pass)")
     sp.add_argument("--force", action="store_true", help="enroll even if the volume is not empty")
     sp = add("run", cmd_run, "cycle every drive assigned to this host until stopped")
     sp.add_argument("--host", required=True, help="host name used in the campaign, e.g. W")
@@ -346,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", required=True)
     sp = add("simulate", cmd_simulate, "write synthetic rehearsal logs for a campaign")
     sp.add_argument("--out", required=True, help="data folder for the synthetic logs")
-    sp.add_argument("--days", type=float, default=50.0)
+    sp.add_argument("--days", type=float, default=12.0)
     sp.add_argument("--seed", type=int, default=1)
     return p
 

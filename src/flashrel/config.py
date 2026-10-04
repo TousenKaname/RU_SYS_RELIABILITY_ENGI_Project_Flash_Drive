@@ -1,6 +1,6 @@
 """Campaign configuration: workloads, cycle settings, failure rules, stop rule.
 
-A *campaign* is one test run over a set of drives (the pilot, Phase 1, ...).
+A *campaign* is one test run over a set of drives (``configs/campaign.yaml``).
 Everything that defines the experiment lives in one YAML file so that the
 harness, the analysis and the report tables read the same numbers.
 """
