@@ -19,8 +19,8 @@ the companion report repository (`Project/`).
 The harness needs only Python ≥ 3.10 and PyYAML, so it runs on Windows, macOS and Linux
 (including a Raspberry Pi). The analysis adds NumPy, SciPy, pandas, Matplotlib and openpyxl.
 
-The fall 2026 test runs nine drives from 6 October, 09:00, to 18 October, 09:00, after a
-two-drive pilot that starts on the evening of 5 October; [`docs/operator_guide.md`](docs/operator_guide.md)
+The fall 2026 test runs nine drives on one Windows PC from 6 October, 09:00, to
+18 October, 09:00, after a two-drive pilot that starts on the evening of 5 October; [`docs/operator_guide.md`](docs/operator_guide.md)
 has the day-by-day steps.
 
 ## Quick start

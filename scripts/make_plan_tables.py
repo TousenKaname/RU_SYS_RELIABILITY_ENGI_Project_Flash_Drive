@@ -36,11 +36,16 @@ def _thousands(n: float) -> str:
 
 
 def drives_table(c: Campaign) -> str:
+    one_host = len({a.host for a in c.assignments.values()}) == 1
+
+    def place(drive_id: str) -> str:
+        a = c.assignments[drive_id]
+        return a.port if one_host else f"{a.host}/{a.port}"
+
     rows = []
     for code, group in c.inventory.groups.items():
         units = [u.drive_id for u in c.inventory.by_group(code) if u.drive_id in c.assignments]
-        placed = ", ".join(f"{u}\\,({c.assignments[u].host}/{c.assignments[u].port})"
-                           for u in units)
+        placed = ", ".join(f"{u}\\,({place(u)})" for u in units)
         rows.append(f"{code} & {group.brand} & {group.capacity_gb:g}\\,GB & {group.housing} & "
                     f"{group.listed_write.replace('MB/s', 'MB/s')} & "
                     f"\\${group.unit_price_usd:.2f} & {len(units)} \\\\\n"

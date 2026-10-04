@@ -1,10 +1,10 @@
-# The test: all nine drives on two hosts, every drive rotating through the three
-# file-size workloads (small -> medium -> large -> small ...).
+# The test: all nine drives on one Windows desktop (host W), every drive rotating
+# through the three file-size workloads (small -> medium -> large -> small ...).
 #
-# Host W = Windows desktop: rear-panel ports W1-W3 and USB dock A (ports A1-A3)
-# Host M = MacBook: USB-C dock B (ports B1-B3)
-# Each host carries one drive of every group, so host effects cannot masquerade
-# as brand or capacity effects.
+# Connection paths: rear-panel ports W1-W3, USB dock A (ports A1-A3), USB dock B
+# (ports B1-B3); front port W4 is the spare. One host means no host effect at all;
+# each path carries at least two groups, and each group spans at least two paths,
+# so a path effect cannot masquerade as a brand or capacity effect.
 #
 # Timeline: pilot on S8-01 and A8-01 from 5 Oct (evening), all nine drives from
 # 6 Oct 09:00, stop on 18 Oct 09:00.
@@ -45,10 +45,10 @@ stop:
 assignments:
   S8-01:  {host: W, port: W1}
   A16-01: {host: W, port: W2}
-  A8-01:  {host: W, port: W3}
-  A8-02:  {host: W, port: A1}
-  A8-03:  {host: W, port: A2}
-  A8-04:  {host: W, port: A3}
-  S8-02:  {host: M, port: B1}
-  A16-02: {host: M, port: B2}
-  A8-05:  {host: M, port: B3}
+  A8-02:  {host: W, port: W3}
+  A8-01:  {host: W, port: A1}
+  S8-02:  {host: W, port: A2}
+  A8-03:  {host: W, port: A3}
+  A16-02: {host: W, port: B1}
+  A8-04:  {host: W, port: B2}
+  A8-05:  {host: W, port: B3}

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Polygon, Rectangle
+from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Rectangle
 
 from flashrel.viz.style import (
     FAIL,
@@ -85,13 +85,6 @@ def _monitor(ax, x, y):
     _poly(ax, [(x + 2.1, y + 0.6), (x + 5.1, y + 0.6)], color=GRAY, lw=0.45, z=4)
 
 
-def _laptop(ax, x, y):
-    ax.add_patch(Rectangle((x + 0.9, y + 1.5), 5.4, 3.8, fc=PAPER, ec=GRAY, lw=0.45, zorder=4))
-    ax.add_patch(Polygon([(x, y + 0.5), (x + 7.2, y + 0.5), (x + 6.3, y + 1.5),
-                          (x + 0.9, y + 1.5)], closed=True, fc=PAPER, ec=GRAY, lw=0.45,
-                         zorder=4))
-
-
 def _host(ax, x, y, w, h, title, subtitle, lines, icon: Callable):
     _box(ax, x, y, w, h)
     icon(ax, x + w - 10.5, y + h - 8.6)
@@ -124,51 +117,50 @@ class RigDrive:
 
 
 DEFAULT_RIG = {
-    "W-direct": [RigDrive("S8-01", "S8", "W1"), RigDrive("A16-01", "A16", "W2"),
-                 RigDrive("A8-01", "A8", "W3")],
-    "W-dockA": [RigDrive("A8-02", "A8", "A1"), RigDrive("A8-03", "A8", "A2"),
-                RigDrive("A8-04", "A8", "A3")],
-    "M-dockB": [RigDrive("S8-02", "S8", "B1"), RigDrive("A16-02", "A16", "B2"),
-                RigDrive("A8-05", "A8", "B3")],
+    "rear": [RigDrive("S8-01", "S8", "W1"), RigDrive("A16-01", "A16", "W2"),
+             RigDrive("A8-02", "A8", "W3")],
+    "dockA": [RigDrive("A8-01", "A8", "A1"), RigDrive("S8-02", "S8", "A2"),
+              RigDrive("A8-03", "A8", "A3")],
+    "dockB": [RigDrive("A16-02", "A16", "B1"), RigDrive("A8-04", "A8", "B2"),
+              RigDrive("A8-05", "A8", "B3")],
 }
 
 
 def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
-    """Panel a: hosts, hubs and drives as wired. Panel b: path of the data to the workbook."""
+    """Panel a: the host, its three connection paths and the drives. Panel b: data path."""
     rig = rig or DEFAULT_RIG
     fig, ax = _canvas(182, 76)
 
     # ---------------- panel a: physical rig ----------------
     _panel(ax, 0.5, 73.0, "a")
-    _section(ax, 5, 73.0, "Hosts")
+    _section(ax, 5, 73.0, "Host")
     _section(ax, 57, 73.0, "Hubs")
     _section(ax, 85, 73.0, "Drives under test")
-    rows = {"W-direct": (66.0, 60.5, 55.0), "W-dockA": (45.0, 39.5, 34.0),
-            "M-dockB": (23.0, 17.5, 12.0)}
+    rows = {"rear": (66.0, 60.5, 55.0), "dockA": (45.0, 39.5, 34.0),
+            "dockB": (23.0, 17.5, 12.0)}
     port_x = 87.0
 
-    _host(ax, 4, 36, 42, 22, "Host W", "Windows desktop",
-          ("flashrel supervisor", "6 drive workers, one process each"), _monitor)
-    _host(ax, 4, 7, 42, 22, "Host M", "MacBook",
-          ("flashrel supervisor", "3 drive workers, one process each"), _laptop)
+    _host(ax, 4, 24, 42, 28, "Host W", "Windows desktop",
+          ("flashrel supervisor", "9 drive workers, one process each",
+           "front port W4 kept as the spare"), _monitor)
 
-    # host W -> its rear-panel ports (one bus)
+    # host -> rear-panel ports (one bus)
     bus_x = 52.0
-    _poly(ax, [(46, 55.0), (bus_x, 55.0)])
-    _poly(ax, [(bus_x, rows["W-direct"][-1]), (bus_x, rows["W-direct"][0])])
-    for y in rows["W-direct"]:
+    _poly(ax, [(46, 48.0), (bus_x, 48.0), (bus_x, rows["rear"][0])])
+    for y in rows["rear"]:
         _poly(ax, [(bus_x, y), (port_x - 2.0, y)])
     _text(ax, 66, 68.8, "rear-panel ports", size=5.2, color=GRAY, style="italic")
 
-    # host -> dock -> ports
-    for (name, kind), ys in ((("Dock A", "USB hub · 3 ports"), rows["W-dockA"]),
-                             (("Dock B", "USB-C hub · 3 ports"), rows["M-dockB"])):
+    # host -> docks -> ports
+    for (name, kind), ys, exit_y in ((("Dock A", "USB hub · 3 ports"), rows["dockA"], 39.5),
+                                     (("Dock B", "USB hub · 3 ports"), rows["dockB"], 28.0)):
         y0, y1 = min(ys) - 4.4, max(ys) + 4.4
         mid = (y0 + y1) / 2
         _box(ax, 58, y0, 17, y1 - y0, fc=PAPER)
         _text(ax, 66.5, mid + 1.9, name, size=6.4, weight="bold")
         _text(ax, 66.5, mid - 1.9, kind, size=5.0, color=GRAY)
-        _poly(ax, [(46, mid), (58, mid)])
+        _poly(ax, [(46, exit_y), (bus_x, exit_y), (bus_x, mid), (58, mid)]
+              if exit_y != mid else [(46, mid), (58, mid)])
         for y in ys:
             _poly(ax, [(75, y), (port_x - 2.0, y)])
 
@@ -180,7 +172,7 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
     # spare port and reference drive, used only for port checks
     _port(ax, port_x, 3.8, "W4")
     _drive(ax, port_x, 3.8, "REF", REF_FILL, ink=INK)
-    _text(ax, 110.5, 3.8, "spare port on host W;\nreference drive for port checks (F5)",
+    _text(ax, 110.5, 3.8, "spare front port;\nreference drive for port checks (F5)",
           size=5.0, color=GRAY, ha="left")
 
     # legend
@@ -193,9 +185,9 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
     _panel(ax, 128.5, 73.0, "b")
     _section(ax, 133, 73.0, "Data path")
     steps = [
-        ("Drive workers", "one process per drive, on both hosts"),
+        ("Drive workers", "one process per drive on host W"),
         ("Local logs", "cycles.csv · events.jsonl · state.json"),
-        ("Shared folder", "synced between the hosts; daily backup"),
+        ("Daily backup", "log folder copied to cloud storage"),
         ("flashrel analyze", "life table, model fits, figures"),
         ("Excel workbook", "sheets by brand, capacity, and file size"),
     ]
