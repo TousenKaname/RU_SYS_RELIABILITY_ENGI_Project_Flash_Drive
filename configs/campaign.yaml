@@ -1,13 +1,13 @@
-# The test: all nine drives on one Windows desktop (host W), every drive rotating
-# through the three file-size workloads (small -> medium -> large -> small ...).
+# The test: eight drives on one Windows desktop (host W), every drive rotating
+# through the three file-size workloads (large -> medium -> small -> large ...).
 #
-# Connection paths: rear-panel ports W1-W3, USB dock A (ports A1-A3), USB dock B
-# (ports B1-B3); front port W4 is the spare. One host means no host effect at all;
-# each path carries at least two groups, and each group spans at least two paths,
-# so a path effect cannot masquerade as a brand or capacity effect.
+# Connection paths: the desktop's six USB-A ports W1-W6 and one USB-C dock with two
+# USB-A ports (D1, D2). The dock carries one SanDisk and one 16 GB drive, so the
+# brand and the capacity comparisons each have a group on both paths. A8-05 is not
+# under test: it is the spare (reference) drive for port checks after the test.
 #
-# Timeline: pilot on S8-01 and A8-01 from 5 Oct (evening), all nine drives from
-# 6 Oct 09:00, stop on 18 Oct 09:00.
+# Timeline (all on 23-24 Oct): intake and self-test from 09:00, pilot on S8-01 and
+# A8-01 from 10:00, all eight drives from 12:00, stop on 24 Oct 12:00 (24 h).
 
 campaign: fall2026
 seed: 20261012
@@ -28,7 +28,7 @@ workloads:
   medium: {min_size: 1MiB,   max_size: 64MiB,  files_per_dir: 64}
   large:  {min_size: 512MiB, max_size: 2GiB,   files_per_dir: 8}
 
-rotation: [small, medium, large]
+rotation: [large, medium, small]   # large first, so the 2 h pilot completes cycles
 
 failure:
   baseline_cycles: 2         # first two passing cycles of each workload set the baseline
@@ -40,15 +40,14 @@ failure:
   intermittent_window: 10    # ... within ten cycles end the drive's life (hard failure)
 
 stop:
-  end_time: 2026-10-18T09:00:00   # local time; drives still running are censored here
+  end_time: 2026-10-24T12:00:00   # local time; drives still running are censored here
 
 assignments:
   S8-01:  {host: W, port: W1}
   A16-01: {host: W, port: W2}
-  A8-02:  {host: W, port: W3}
-  A8-01:  {host: W, port: A1}
-  S8-02:  {host: W, port: A2}
-  A8-03:  {host: W, port: A3}
-  A16-02: {host: W, port: B1}
-  A8-04:  {host: W, port: B2}
-  A8-05:  {host: W, port: B3}
+  A8-01:  {host: W, port: W3}
+  A8-02:  {host: W, port: W4}
+  A8-03:  {host: W, port: W5}
+  A8-04:  {host: W, port: W6}
+  S8-02:  {host: W, port: D1}
+  A16-02: {host: W, port: D2}

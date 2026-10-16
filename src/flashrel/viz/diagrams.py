@@ -35,7 +35,7 @@ EDGE = "#A9A9A9"        # outline of neutral boxes
 IO_FILL, IO_EDGE = "#EAF0F5", "#A7BACB"          # the three timed I/O phases
 FAIL_FILL, FAIL_EDGE = "#FBEDE9", "#E0A595"      # failure handling
 PASS_FILL, PASS_EDGE = "#EAF3ED", "#9CC3AC"      # recovery
-REF_FILL = "#CFCFCF"                             # reference drive
+REF_FILL = "#CFCFCF"                             # spare drive
 
 
 # -- primitives -------------------------------------------------------------------------------
@@ -117,17 +117,16 @@ class RigDrive:
 
 
 DEFAULT_RIG = {
-    "rear": [RigDrive("S8-01", "S8", "W1"), RigDrive("A16-01", "A16", "W2"),
-             RigDrive("A8-02", "A8", "W3")],
-    "dockA": [RigDrive("A8-01", "A8", "A1"), RigDrive("S8-02", "S8", "A2"),
-              RigDrive("A8-03", "A8", "A3")],
-    "dockB": [RigDrive("A16-02", "A16", "B1"), RigDrive("A8-04", "A8", "B2"),
-              RigDrive("A8-05", "A8", "B3")],
+    "host": [RigDrive("S8-01", "S8", "W1"), RigDrive("A16-01", "A16", "W2"),
+             RigDrive("A8-01", "A8", "W3"), RigDrive("A8-02", "A8", "W4"),
+             RigDrive("A8-03", "A8", "W5"), RigDrive("A8-04", "A8", "W6")],
+    "dock": [RigDrive("S8-02", "S8", "D1"), RigDrive("A16-02", "A16", "D2")],
 }
+SPARE = RigDrive("A8-05", "A8", "")
 
 
 def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
-    """Panel a: the host, its three connection paths and the drives. Panel b: data path."""
+    """Panel a: the host, its two connection paths and the drives. Panel b: data path."""
     rig = rig or DEFAULT_RIG
     fig, ax = _canvas(182, 74)
     head = 71.2   # baseline of the panel letters and section headers
@@ -135,45 +134,44 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
     # ---------------- panel a: physical rig ----------------
     _panel(ax, 0.5, head, "a")
     _section(ax, 5, head, "Host")
-    _section(ax, 57, head, "Hubs")
+    _section(ax, 57, head, "Ports")
     _section(ax, 85, head, "Drives under test")
-    rows = {"rear": (66.0, 60.5, 55.0), "dockA": (45.0, 39.5, 34.0),
-            "dockB": (23.0, 17.5, 12.0)}
+    step = 5.4
+    rows = {"host": tuple(65.0 - step * i for i in range(6)),
+            "dock": (26.0, 20.6)}
     port_x = 87.0
 
-    _host(ax, 4, 24, 42, 28, "Host W", "Windows desktop",
-          ("flashrel supervisor", "9 drive workers, one process each",
-           "front port W4 kept as the spare"), _monitor)
+    _host(ax, 4, 28, 42, 28, "Host W", "Windows desktop",
+          ("flashrel supervisor", "8 drive workers, one process each",
+           "started from one command"), _monitor)
 
-    # host -> rear-panel ports (one bus)
+    # host -> its own USB-A ports
     bus_x = 52.0
-    _poly(ax, [(46, 48.0), (bus_x, 48.0), (bus_x, rows["rear"][0])])
-    for y in rows["rear"]:
+    _poly(ax, [(46, 50.0), (bus_x, 50.0), (bus_x, rows["host"][0])])
+    _poly(ax, [(bus_x, 50.0), (bus_x, rows["host"][-1])])
+    for y in rows["host"]:
         _poly(ax, [(bus_x, y), (port_x - 2.0, y)])
-    _text(ax, 66, 68.8, "rear-panel ports", size=5.2, color=GRAY, style="italic")
+    _text(ax, 66, 68.6, "desktop USB-A ports", size=5.2, color=GRAY, style="italic")
 
-    # host -> docks -> ports
-    for (name, kind), ys, exit_y in ((("Dock A", "USB hub · 3 ports"), rows["dockA"], 39.5),
-                                     (("Dock B", "USB hub · 3 ports"), rows["dockB"], 28.0)):
-        y0, y1 = min(ys) - 4.4, max(ys) + 4.4
-        mid = (y0 + y1) / 2
-        _box(ax, 58, y0, 17, y1 - y0, fc=PAPER)
-        _text(ax, 66.5, mid + 1.9, name, size=6.4, weight="bold")
-        _text(ax, 66.5, mid - 1.9, kind, size=5.0, color=GRAY)
-        _poly(ax, [(46, exit_y), (bus_x, exit_y), (bus_x, mid), (58, mid)]
-              if exit_y != mid else [(46, mid), (58, mid)])
-        for y in ys:
-            _poly(ax, [(75, y), (port_x - 2.0, y)])
+    # host -> dock -> ports
+    ys = rows["dock"]
+    y0, y1 = min(ys) - 4.4, max(ys) + 4.4
+    mid = (y0 + y1) / 2
+    _box(ax, 58, y0, 17, y1 - y0, fc=PAPER)
+    _text(ax, 66.5, mid + 1.9, "Dock", size=6.4, weight="bold")
+    _text(ax, 66.5, mid - 1.9, "USB-C · 2 ports", size=5.0, color=GRAY)
+    _poly(ax, [(46, 33.0), (bus_x - 3, 33.0), (bus_x - 3, mid), (58, mid)])
+    for y in ys:
+        _poly(ax, [(75, y), (port_x - 2.0, y)])
 
     for key, ys in rows.items():
         for y, d in zip(ys, rig[key]):
             _port(ax, port_x, y, d.port)
             _drive(ax, port_x, y, d.drive_id, GROUP_COLORS[d.group])
 
-    # spare port and reference drive, used only for port checks
-    _port(ax, port_x, 3.8, "W4")
-    _drive(ax, port_x, 3.8, "REF", REF_FILL, ink=INK)
-    _text(ax, 110.5, 3.8, "spare front port;\nreference drive for port checks (F5)",
+    # spare drive, kept aside; used only for port checks after the test
+    _drive(ax, port_x, 9.5, SPARE.drive_id, REF_FILL, ink=INK)
+    _text(ax, 110.5, 9.5, "spare drive, not under test;\nchecks a suspect port (F5)",
           size=5.0, color=GRAY, ha="left")
 
     # legend
@@ -188,7 +186,7 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
     steps = [
         ("Drive workers", "one process per drive on host W"),
         ("Local logs", "cycles.csv · events.jsonl · state.json"),
-        ("Daily backup", "log folder copied to cloud storage"),
+        ("Backup", "log folder copied to cloud storage"),
         ("flashrel analyze", "life table, model fits, figures"),
         ("Excel workbook", "sheets by brand, capacity, and file size"),
     ]
@@ -269,9 +267,9 @@ def cycle_flowchart():
     top, bottom = 27.5, 8.5   # lower edges of the two rows of outcomes
     outcome(108, top, 32, "Soft failure (D2)", "drive keeps cycling;\nevent is logged",
             PASS_FILL, PASS_EDGE, PASS)
-    outcome(108, bottom, 32, "Operator re-check",
-            "drive moved to the spare\nport; reformat if needed", "white", EDGE)
-    outcome(148, top, 31, "Port fault (F5)", "reference drive also fails\nthe port: not counted",
+    outcome(108, bottom, 32, "Post-test check",
+            "drive re-tested on another\nport after the stop", "white", EDGE)
+    outcome(148, top, 31, "Port fault (F5)", "spare drive also fails\nthe port: not counted",
             PAPER, EDGE, GRAY)
     outcome(148, bottom, 31, "Hard failure", "fails again: life T = k;\ndrive is retired",
             FAIL_FILL, FAIL_EDGE, FAIL)
@@ -311,10 +309,8 @@ class Milestone:
     align: str = "center"             # label alignment, to keep close labels apart
 
 
-STREAM_COLORS = {"prep": "#A9C0D3", "test": "#2B5C8A", "check": "#2B5C8A",
-                 "report": "#D9973F"}
-STREAM_LABELS = {"prep": "preparation", "test": "testing (unattended)",
-                 "check": "daily status check", "report": "analysis and slides"}
+STREAM_COLORS = {"prep": "#A9C0D3", "test": "#2B5C8A", "report": "#D9973F"}
+STREAM_LABELS = {"prep": "preparation", "test": "testing (unattended)", "report": "analysis"}
 WEEKEND = "#F5F5F3"
 
 
@@ -372,13 +368,7 @@ def schedule_figure(tasks: Sequence[Task], milestones: Sequence[Milestone], star
             ha="left", va="top")
 
     streams = [s for s in STREAM_COLORS if any(t.stream == s for t in tasks)]
-    handles = []
-    for s in streams:
-        if s == "check":
-            handles.append(plt.Line2D([], [], ls="none", marker="o", ms=2.6,
-                                      color=STREAM_COLORS[s]))
-        else:
-            handles.append(Rectangle((0, 0), 1, 1, fc=STREAM_COLORS[s], ec="none"))
+    handles = [Rectangle((0, 0), 1, 1, fc=STREAM_COLORS[s], ec="none") for s in streams]
     ax.legend(handles, [STREAM_LABELS[s] for s in streams], loc="upper right",
               bbox_to_anchor=(1.0, -0.2), ncol=len(streams), fontsize=5.6, handlelength=1.3,
               handleheight=0.75, columnspacing=1.4, frameon=False)

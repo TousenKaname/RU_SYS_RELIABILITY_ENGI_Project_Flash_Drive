@@ -3,7 +3,7 @@
 A fault in a dock, a port or a host tends to hit several drives at once,
 while a worn-out drive fails on its own. Cycle failures of two or more drives
 that share a host and hub within a short window are therefore flagged for the
-attribution protocol (port check with the reference drive) before any of them
+attribution protocol (port check with the spare drive) before any of them
 is counted as a drive failure.
 """
 

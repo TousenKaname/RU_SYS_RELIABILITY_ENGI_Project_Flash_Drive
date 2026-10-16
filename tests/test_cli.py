@@ -29,7 +29,7 @@ def test_simulate_then_analyze(tmp_path):
     out = tmp_path / "report"
     assert main(["analyze", str(cfg), "--out", str(out)]) == 0
     life = pd.read_csv(out / "life_table.csv")
-    assert len(life) == 9 and set(life["group"]) == {"S8", "A8", "A16"}
+    assert len(life) == 8 and set(life["group"]) == {"S8", "A8", "A16"}
     assert (out / "fig_life.pdf").exists() and (out / "fall2026.xlsx").exists()
     sheets = pd.ExcelFile(out / "fall2026.xlsx").sheet_names
     assert {"Drives", "Cycles", "Events", "LifeTable", "ByGroup", "ByWorkload"} <= set(sheets)
@@ -54,4 +54,4 @@ def test_portcheck_refuses_a_test_drive(campaign, drive, capsys):
 
     write_identity(drive, "T8-01")
     rc = main(["portcheck", str(campaign.source), "--port", "P1", "--mount", str(drive)])
-    assert rc == 2 and "reference drive only" in capsys.readouterr().err
+    assert rc == 2 and "spare drive only" in capsys.readouterr().err

@@ -135,8 +135,8 @@ def cmd_recheck(args) -> int:
             log.append_event(Event(args.drive, state.cycles_done, EventType.ATTENTION, "", {
                 "reason": "operator re-check failed", "port": port, "host": host,
                 "check": summary}))
-            print("check FAILED: try the spare port; if it fails there too, reformat once and "
-                  "recheck, then `flashrel retire`", file=sys.stderr)
+            print("check FAILED on a second port: record the hard failure with `flashrel retire`",
+                  file=sys.stderr)
             return 1
         log.append_event(Event(args.drive, state.cycles_done, EventType.RECOVERED, "D2", {
             "recovered_by": "operator re-check", "port": port, "host": host,
@@ -145,8 +145,8 @@ def cmd_recheck(args) -> int:
         log.save_state(state)
     print(f"{args.drive} is active again on {host or 'its host'} port {port}")
     if port != old_port:
-        print(f"the drive passed on a new port: test port {old_port} with the reference drive "
-              "(`flashrel portcheck`) and log `flashrel port-fault` if the reference fails there")
+        print(f"the drive passed on a new port: test port {old_port} with the spare drive "
+              "(`flashrel portcheck`) and log `flashrel port-fault` if the spare fails there")
     return 0
 
 
@@ -158,11 +158,11 @@ def cmd_portcheck(args) -> int:
     ident = read_identity(Path(args.mount)) or {}
     if ident.get("drive_id") in campaign.assignments:
         raise CommandError(f"{args.mount} holds test drive {ident['drive_id']}; port checks "
-                           "use the reference drive only")
+                           "use the spare drive only")
     result = check_drive(Path(args.mount), campaign, "REF", port=args.port)
     print(json.dumps(check_summary(result), indent=2))
     ok = result.outcome is Outcome.PASS
-    print(f"port {args.port}: {'OK' if ok else 'FAULTY (reference drive failed)'}")
+    print(f"port {args.port}: {'OK' if ok else 'FAULTY (spare drive failed)'}")
     return 0 if ok else 1
 
 
@@ -323,9 +323,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--port", help="port the drive is plugged into now")
     sp.add_argument("--host", help="host label, if it changed")
     sp.add_argument("--wait", type=float, default=30.0)
-    sp = add("portcheck", cmd_portcheck, "test a port with the reference drive")
+    sp = add("portcheck", cmd_portcheck, "test a port with the spare drive")
     sp.add_argument("--port", required=True)
-    sp.add_argument("--mount", required=True, help="mount point of the reference drive")
+    sp.add_argument("--mount", required=True, help="mount point of the spare drive")
     sp = add("port-fault", cmd_port_fault, "re-attribute a cycle failure to a faulty port (F5)")
     sp.add_argument("--drive", required=True)
     sp.add_argument("--cycle", type=int, required=True)
@@ -347,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--out", required=True)
     sp = add("simulate", cmd_simulate, "write synthetic rehearsal logs for a campaign")
     sp.add_argument("--out", required=True, help="data folder for the synthetic logs")
-    sp.add_argument("--days", type=float, default=12.0)
+    sp.add_argument("--days", type=float, default=1.0)
     sp.add_argument("--seed", type=int, default=1)
     return p
 

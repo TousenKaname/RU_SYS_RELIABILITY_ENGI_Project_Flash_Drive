@@ -7,7 +7,7 @@ The model is the accelerated-failure-time form of the Weibull distribution,
 so every covariate multiplies the characteristic life by exp(beta_j) and the
 shape gamma = 1/sigma is common to all drives. The same model is a
 proportional-hazards model with hazard ratio exp(-beta_j / sigma), which links
-it to the PH model of the course. A common shape lets nine drives in three
+it to the PH model of the course. A common shape lets eight drives in three
 groups share one estimate of gamma instead of three noisy ones.
 """
 

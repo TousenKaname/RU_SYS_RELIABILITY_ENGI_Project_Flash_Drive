@@ -11,7 +11,8 @@ protocol: wait for the drive to re-enumerate, check that it still accepts
 writes, and run a short recovery check (64 MiB written, verified, deleted,
 with fresh data every time). A drive that passes keeps cycling, and the
 failure is logged as intermittent (D2). A drive that does not is set to
-*attention* for an operator (``flashrel recheck`` / ``flashrel retire``).
+*attention* and stops until the post-test check after the stop time
+(``flashrel recheck`` on a free port, then ``flashrel retire`` if it fails again).
 
 The supervisor also runs a watchdog: every worker reports progress after each
 1 MiB chunk, and a drive that makes no progress for ``hang_timeout_s`` is
@@ -133,7 +134,7 @@ def conclude_failure(log: DriveLog, state: DriveState, campaign: Campaign, code:
     else:
         log.append_event(Event(state.drive_id, state.cycles_done, EventType.ATTENTION, code, {
             "reason": reason,
-            "next_steps": "re-plug into the spare port and run `flashrel recheck`; "
+            "next_steps": "after the stop, re-plug into a free port and run `flashrel recheck`; "
                           "retire with `flashrel retire` if it fails again", **detail}))
         state.status = DriveStatus.ATTENTION
     log.save_state(state)
@@ -267,7 +268,7 @@ class DriveWorker:
                         **detail) -> None:
         self._event(state, EventType.ATTENTION, code, {
             "reason": reason, "port": self.port, "host": self.host,
-            "next_steps": "re-plug into the spare port and run `flashrel recheck`; "
+            "next_steps": "after the stop, re-plug into a free port and run `flashrel recheck`; "
                           "retire with `flashrel retire` if it fails again", **detail})
         self._set_status(state, DriveStatus.ATTENTION)
 

@@ -87,21 +87,21 @@ def test_drive_lock_is_exclusive():
 
 def test_repository_configs_load():
     campaign = load_campaign(REPO / "configs" / "campaign.yaml")
-    assert len(campaign.assignments) == 9
+    assert len(campaign.assignments) == 8  # A8-05 is the spare drive, not under test
     assert {a.host for a in campaign.assignments.values()} == {"W"}  # Windows desktop only
-    paths: dict[str, set[str]] = {}  # connection path (W rear panel, A/B docks) -> groups
+    paths: dict[str, set[str]] = {}  # connection path (W desktop ports, D dock) -> groups
     spans: dict[str, set[str]] = {}  # group -> connection paths
     for a in campaign.assignments.values():
         group = campaign.inventory[a.drive_id].group.code
         paths.setdefault(a.port[0], set()).add(group)
         spans.setdefault(group, set()).add(a.port[0])
-    assert set(paths) == {"W", "A", "B"}
+    assert set(paths) == {"W", "D"}
     assert all(len(groups) >= 2 for groups in paths.values())
-    assert all(len(p) >= 2 for p in spans.values())
+    assert sum(len(p) >= 2 for p in spans.values()) >= 2  # S8 and A16 use both paths
     assert [campaign.workload_for_cycle(c).name for c in (1, 2, 3, 4)] == \
-        ["small", "medium", "large", "small"]
-    # the test ends on 18 Oct 2026, 09:00, in time for the analysis and the slides
-    assert campaign.stop.end_time == datetime(2026, 10, 18, 9, 0)
+        ["large", "medium", "small", "large"]
+    # the test runs for one day and ends on 24 Oct 2026, 12:00
+    assert campaign.stop.end_time == datetime(2026, 10, 24, 12, 0)
 
 
 def test_bad_config_is_rejected(tmp_path):

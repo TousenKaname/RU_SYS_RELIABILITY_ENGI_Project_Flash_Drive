@@ -26,8 +26,8 @@ from flashrel.config import Campaign
 from flashrel.failure import DriveState, DriveStatus, Event, EventType
 from flashrel.recorder import CYCLE_FIELDS, DriveLog
 
-#: All nine drives start on 6 Oct 2026 at 09:00 EDT; logs keep UTC, like the harness.
-TEST_START = datetime(2026, 10, 6, 13, 0, tzinfo=timezone.utc)
+#: All eight drives start on 23 Oct 2026 at 12:00 EDT; logs keep UTC, like the harness.
+TEST_START = datetime(2026, 10, 23, 16, 0, tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)

@@ -58,7 +58,7 @@ def drives_table(c: Campaign) -> str:
 
 def workloads_table(c: Campaign) -> str:
     rows = []
-    for name in c.rotation:
+    for name in sorted(c.rotation, key=lambda n: c.workloads[n].min_size):
         w = c.workloads[name]
         counts = []
         for cap in (8, 16):

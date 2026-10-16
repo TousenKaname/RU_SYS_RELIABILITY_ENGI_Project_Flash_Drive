@@ -19,9 +19,10 @@ the companion report repository (`Project/`).
 The harness needs only Python ≥ 3.10 and PyYAML, so it runs on Windows, macOS and Linux
 (including a Raspberry Pi). The analysis adds NumPy, SciPy, pandas, Matplotlib and openpyxl.
 
-The fall 2026 test runs nine drives on one Windows PC from 6 October, 09:00, to
-18 October, 09:00, after a two-drive pilot that starts on the evening of 5 October; [`docs/operator_guide.md`](docs/operator_guide.md)
-has the day-by-day steps.
+The fall 2026 test runs eight drives on one Windows PC (six desktop ports and one USB-C
+dock with two ports) for 24 hours, from 23 October, 12:00, to 24 October, 12:00, after a
+two-hour pilot on two drives. Once started, the test runs unattended until the stop
+time; [`docs/operator_guide.md`](docs/operator_guide.md) is the runbook.
 
 ## Quick start
 
@@ -70,8 +71,9 @@ re-enumerate, checks for a read-only lock and runs a 64 MiB recovery check.
 | | | D3 | transient error cleared by a retry |
 
 A drive's life ends (hard failure) when it does not pass the recovery protocol, locks
-read-only, changes capacity, or has 3 cycle failures within 10 cycles. See
-[`docs/operator_guide.md`](docs/operator_guide.md) for the operator protocol.
+read-only, changes capacity, or has 3 cycle failures within 10 cycles. A drive whose
+automatic recovery check fails stops until the post-test check after the stop time; see
+[`docs/operator_guide.md`](docs/operator_guide.md).
 
 ## Repository layout
 
@@ -94,15 +96,14 @@ src/flashrel/       the package
   viz/              figure style, data plots, schematic diagrams
 scripts/            make_plan_figures.py, make_plan_tables.py, planning_assumptions.py
 hardware/arduino/   optional DS18B20 temperature logger sketch
-docs/               operator guide
+docs/               runbook for the one-day test
 tests/              70 tests, including end-to-end cycles with injected faults
 ```
 
 Each drive's logs live in `<data_dir>/<campaign>/<drive>/`: `cycles.csv` (one row per
 cycle, 36 fields), `events.jsonl`, `state.json` (resume point) and `intake.json`. The
 logs are the record of truth: a restarted worker reconciles `state.json` with them, so
-no cycle is counted twice. Point `data_dir` in the campaign file at a synced folder so
-both hosts write to one place.
+no cycle is counted twice.
 
 ## Figures and tables of the test plan
 
@@ -111,7 +112,7 @@ python scripts/make_plan_figures.py --out ../Project/figures --formats pdf
 python scripts/make_plan_tables.py  --out ../Project/tables
 ```
 
-The figures follow one visual system (`viz/style.py`): 7 pt sans-serif type, thin axes,
+The plan has four figures (rig, cycle, planning, schedule). They follow one visual system (`viz/style.py`): 7 pt sans-serif type, thin axes,
 brand as hue and capacity as lightness, colour-blind-safe, and exported at exactly the
 IEEE text width so LaTeX places them at 1:1 scale. The tables are generated from the same
 YAML files the harness runs on. Planning speeds are in `scripts/planning_assumptions.py`;
