@@ -100,8 +100,8 @@ def test_repository_configs_load():
     assert sum(len(p) >= 2 for p in spans.values()) >= 2  # S8 and A16 use both paths
     assert [campaign.workload_for_cycle(c).name for c in (1, 2, 3, 4)] == \
         ["large", "medium", "small", "large"]
-    # the test runs for one day and ends on 24 Oct 2026, 12:00
-    assert campaign.stop.end_time == datetime(2026, 10, 24, 12, 0)
+    # the test runs for one day and ends on 24 Oct 2026, 20:00 (planned 12:00; started 8 h late)
+    assert campaign.stop.end_time == datetime(2026, 10, 24, 20, 0)
 
 
 def test_bad_config_is_rejected(tmp_path):

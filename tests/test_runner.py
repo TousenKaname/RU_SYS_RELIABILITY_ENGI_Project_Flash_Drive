@@ -140,3 +140,54 @@ def test_recovery_checks_use_fresh_data(campaign, drive):
 
     volume = VolumeUsage(total=10**9, free=10**9, cluster_size=4096)
     assert first(volume).files[0].key != second(volume).files[0].key
+
+
+def test_stop_time_cuts_the_cycle_in_progress(worker_env, drive, monkeypatch):
+    # Cycle 1 passes; cycle 2 is held between its write and read-back until the stop time.
+    from datetime import datetime, timedelta
+
+    camp = dataclasses.replace(worker_env,
+                               stop=StopRule(end_time=datetime.now() + timedelta(seconds=3)))
+    monkeypatch.setattr(runner, "find_drive", lambda drive_id: drive)
+    stop = threading.Event()
+    real = runner.run_cycle
+
+    def held(*args, **kwargs):
+        if kwargs.get("cycle") == 2:
+            kwargs["fault_hook"] = lambda cycle_dir, plan: stop.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_cycle", held)
+    status = runner.DriveWorker(camp, "T8-01", "H", stop).run()
+    log = DriveLog(camp.run_dir, "T8-01")
+    assert status is DriveStatus.CENSORED and log.load_state().cycles_done == 1
+    assert [r["cycle"] for r in log.read_cycles()] == ["1"]
+    kinds = [e.type for e in events(camp)]
+    assert kinds[-2:] == [EventType.NOTE, EventType.CENSORED]
+    assert not (drive / runner.PAYLOAD_DIR).exists()  # the cut-short cycle was cleaned up
+
+
+def test_a_timer_that_fires_early_still_censors(worker_env, drive, monkeypatch):
+    # On Windows a timer can return a few ms before the wall clock reaches the stop time;
+    # the worker must still treat the deadline as reached.
+    from datetime import datetime, timedelta
+
+    class EarlyTimer(threading.Timer):
+        def __init__(self, interval, function):
+            super().__init__(0.5, function)  # fires long before the (far) stop time
+
+    camp = dataclasses.replace(worker_env,
+                               stop=StopRule(end_time=datetime.now() + timedelta(days=1)))
+    monkeypatch.setattr(runner, "find_drive", lambda drive_id: drive)
+    monkeypatch.setattr(runner.threading, "Timer", EarlyTimer)
+    stop = threading.Event()
+    real = runner.run_cycle
+
+    def held(*args, **kwargs):
+        kwargs["fault_hook"] = lambda cycle_dir, plan: stop.wait(30)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_cycle", held)
+    status = runner.DriveWorker(camp, "T8-01", "H", stop).run()
+    assert status is DriveStatus.CENSORED
+    assert [e.type for e in events(camp)][-2:] == [EventType.NOTE, EventType.CENSORED]

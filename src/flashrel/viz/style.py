@@ -30,10 +30,14 @@ PAPER = "#F4F4F2"
 FAIL = "#C4452F"     # vermilion
 PASS = "#3F7F5F"     # muted green
 
+#: Checked with the data-viz palette validator (light mode, white surface, all pairs):
+#: every slot inside the OKLCH lightness band and above the chroma floor, worst pair
+#: Delta E 21.8 under deuteranopia and 23.3 for normal vision. ABLAZE amber sits below
+#: 3:1 against white, so its marks always carry a marker shape and a table twin.
 GROUP_COLORS = {
-    "S8": "#4A7FB0",   # SanDisk 8 GB, mid blue
+    "S8": "#3A76B8",   # SanDisk 8 GB, mid blue
     "A8": "#D9973F",   # ABLAZE 8 GB, light amber
-    "A16": "#8C5320",  # ABLAZE 16 GB, dark amber
+    "A16": "#8A4F17",  # ABLAZE 16 GB, dark amber
 }
 GROUP_LABELS = {
     "S8": "SanDisk 8 GB",
@@ -41,7 +45,15 @@ GROUP_LABELS = {
     "A16": "ABLAZE 16 GB",
 }
 GROUP_MARKERS = {"S8": "o", "A8": "s", "A16": "^"}
-WORKLOAD_COLORS = {"small": "#9CC9BA", "medium": "#4E9C86", "large": "#1F5F51"}
+#: File size is ordered, so the workloads take one hue in monotone lightness steps
+#: (validated as an ordinal ramp: light end 2.17:1 on white).
+WORKLOAD_COLORS = {"small": "#86BBA8", "medium": "#3E8C74", "large": "#1B5546"}
+#: The three timed phases of a cycle run in a fixed order, so they too take one hue
+#: (violet, used nowhere else) in monotone lightness steps (validated as an ordinal
+#: ramp on white: light end 2.40:1).
+PHASE_COLORS = {"write": "#3F3470", "verify": "#7A69AD", "delete": "#ADA0D2"}
+PHASE_LABELS = {"write": "write", "verify": "read-back", "delete": "delete"}
+GRID = "#E4E7EB"     # hairline gridlines, one step off the white surface
 
 RC = {
     "font.family": "sans-serif",

@@ -125,8 +125,17 @@ DEFAULT_RIG = {
 SPARE = RigDrive("A8-05", "A8", "")
 
 
-def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
-    """Panel a: the host, its two connection paths and the drives. Panel b: data path."""
+PLANNED_HOST_LINES = ("flashrel supervisor", "8 drive workers, one process each",
+                      "started from one command")
+
+
+def rig_figure(rig: dict[str, list[RigDrive]] | None = None,
+               host_lines: tuple[str, str, str] = PLANNED_HOST_LINES):
+    """Panel a: the host, its two connection paths and the drives. Panel b: data path.
+
+    ``host_lines`` describe the software on the host (the plan's text by default; the
+    final report passes the configuration as run).
+    """
     rig = rig or DEFAULT_RIG
     fig, ax = _canvas(182, 74)
     head = 71.2   # baseline of the panel letters and section headers
@@ -141,9 +150,7 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
             "dock": (26.0, 20.6)}
     port_x = 87.0
 
-    _host(ax, 4, 28, 42, 28, "Host W", "Windows desktop",
-          ("flashrel supervisor", "8 drive workers, one process each",
-           "started from one command"), _monitor)
+    _host(ax, 4, 28, 42, 28, "Host W", "Windows desktop", host_lines, _monitor)
 
     # host -> its own USB-A ports
     bus_x = 52.0
@@ -206,9 +213,9 @@ def rig_figure(rig: dict[str, list[RigDrive]] | None = None):
 # -- figure: test cycle and failure handling -------------------------------------------------
 def cycle_flowchart():
     """One cycle (top row) and what happens when a phase fails (bottom rows)."""
-    fig, ax = _canvas(182, 79.5)
+    # no title inside the figure: the caption names it (the loop label tops out near 74 mm)
+    fig, ax = _canvas(182, 75.5)
     dash = (0, (2.4, 1.6))
-    _section(ax, 3, 77.0, "One test cycle, repeated until the drive fails or the test stops")
 
     main = [
         ("Locate drive", "by its identity file,\nnot its drive letter"),

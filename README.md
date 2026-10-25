@@ -19,10 +19,15 @@ the companion report repository (`Project/`).
 The harness needs only Python ≥ 3.10 and PyYAML, so it runs on Windows, macOS and Linux
 (including a Raspberry Pi). The analysis adds NumPy, SciPy, pandas, Matplotlib and openpyxl.
 
-The fall 2026 test runs eight drives on one Windows PC (six desktop ports and one USB-C
-dock with two ports) for 24 hours, from 23 October, 12:00, to 24 October, 12:00, after a
-two-hour pilot on two drives. Once started, the test runs unattended until the stop
-time; [`docs/operator_guide.md`](docs/operator_guide.md) is the runbook.
+The fall 2026 test ran eight drives on one Windows PC (six desktop ports and one USB-C
+dock with two ports) for 24 hours, from 23 October, 20:00, to 24 October, 20:00, after a
+pilot on two drives from 17:44 (eight hours later than planned; the durations were kept).
+Once started, the test runs unattended until the stop time;
+[`docs/operator_guide.md`](docs/operator_guide.md) is the runbook.
+
+At the stop time every worker ends the cycle in progress at the next file boundary, does
+not count it, logs what it had shown, censors the drive and removes the partial payload,
+so the test ends at the stop time and not up to one cycle later.
 
 ## Quick start
 
@@ -94,10 +99,14 @@ src/flashrel/       the package
   analysis/         life data, nonparametric, parametric, regression, per-cycle hazard,
                     degradation, attribution, planning, simulation, export, report
   viz/              figure style, data plots, schematic diagrams
-scripts/            make_plan_figures.py, make_plan_tables.py, planning_assumptions.py
+scripts/            make_plan_figures.py, make_plan_tables.py, planning_assumptions.py (plan)
+                    post_test_check.py (every drive after the stop), make_results.py and
+                    results_figures.py (report figures, tables, key numbers),
+                    forensics.py (raw reads of the failed drives), slide_figures.py,
+                    make_presentation.py and check_deck.ps1 (the presentation)
 hardware/arduino/   optional DS18B20 temperature logger sketch
 docs/               runbook for the one-day test
-tests/              70 tests, including end-to-end cycles with injected faults
+tests/              74 tests, including end-to-end cycles with injected faults
 ```
 
 Each drive's logs live in `<data_dir>/<campaign>/<drive>/`: `cycles.csv` (one row per
@@ -120,6 +129,32 @@ replace them with the pilot's measurements and regenerate.
 
 `flashrel simulate configs/campaign.yaml --out data-sim` writes synthetic logs (made-up
 parameters, clearly not measurements) to rehearse the whole analysis before real data exist.
+
+## Results, final report and presentation
+
+After the stop (`C` stands for `configs/campaign.yaml`):
+
+```bash
+python scripts/post_test_check.py C --host W     # access every drive again (project 4.4)
+flashrel export C --out data/fall2026.xlsx
+flashrel analyze C --out reports/fall2026
+python scripts/forensics.py capture C --out data/fall2026/forensics   # failed drives, read-only
+python scripts/make_results.py C --out ../Project/results          # figures, tables, numbers
+python scripts/slide_figures.py C --out ../Project/results/slides  # half-size slide figures
+python scripts/make_presentation.py --template ../Proposal/ISE585_Project4_Proposal.pptx \
+    --results ../Project/results --text ../Project/deck_text.json \
+    --hands data/fall2026/posttest-hands.json \
+    --out ../Proposal/ISE585_Project4_Presentation.pptx
+```
+
+`scripts/check_deck.ps1 -Deck <pptx>` then checks the deck layout through PowerPoint
+(read-only): text that overflows its box or overlaps other text or pictures, and anything
+past the margins.
+
+`make_results.py` writes the figures of the final report (`Project/final_report.tex`) at
+the IEEE column and page widths, the LaTeX tables, and `results.json` with every number
+the report and the slides quote. Its palette was checked with a colour-vision validator
+(brand is hue, capacity is lightness, file size is a one-hue ramp).
 
 ## Development
 

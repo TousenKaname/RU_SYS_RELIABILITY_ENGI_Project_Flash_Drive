@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from flashrel.config import Campaign, WorkloadSpec, load_campaign
-from flashrel.cycle import CycleResult, ErrorRecord, Outcome, Planner, run_cycle
+from flashrel.cycle import CycleResult, ErrorRecord, Outcome, Planner, _remove_tree, run_cycle
 from flashrel.failure import (
     FAILURE_CODES,
     DriveState,
@@ -46,12 +46,12 @@ from flashrel.failure import (
     apply_cycle,
     intermittent_limit_reached,
 )
-from flashrel.payload import fill_budget, plan_cycle
+from flashrel.payload import PAYLOAD_DIR, fill_budget, plan_cycle
 from flashrel.recorder import DriveLog, append_temperature, drive_lock
 from flashrel.sensors import NullTemperatureSource, TemperatureSource
 from flashrel.system.errors import ErrorKind
 from flashrel.system.power import keep_awake
-from flashrel.system.volumes import VolumeUsage, is_read_only, wait_for_drive
+from flashrel.system.volumes import VolumeUsage, find_drive, is_read_only, wait_for_drive
 from flashrel.units import KiB, MiB
 
 #: Size and file mix of the short check run after a failure and by ``recheck``.
@@ -168,6 +168,7 @@ class DriveWorker:
         self.stop = stop
         self.report = report or (lambda progress: None)
         self.log = DriveLog(campaign.run_dir, drive_id)
+        self.deadline_reached = False
         self.beat = None
         if heartbeat is not None:
             def beat() -> None:
@@ -183,22 +184,68 @@ class DriveWorker:
             if state.port:  # an operator may have moved the drive (recheck / note --port)
                 self.port = state.port
             self.log.save_state(state)
-            while not self.stop.is_set() and state.status is DriveStatus.ACTIVE:
-                try:
-                    self._one_cycle(state)
-                except Exception as exc:  # log and hand over instead of crash-looping
-                    self._needs_operator(state, f"unexpected error: {exc!r}",
-                                         trace=traceback.format_exc(limit=4))
+            deadline = self._arm_deadline()
+            try:
+                while not self.stop.is_set() and state.status is DriveStatus.ACTIVE:
+                    try:
+                        self._one_cycle(state)
+                    except Exception as exc:  # log and hand over instead of crash-looping
+                        self._needs_operator(state, f"unexpected error: {exc!r}",
+                                             trace=traceback.format_exc(limit=4))
+            finally:
+                if deadline is not None:
+                    deadline.cancel()
+            if state.status is DriveStatus.ACTIVE and self._stop_time_reached(state):
+                self._censor(state)
             return state.status
+
+    # -- stop time (Type I censoring) -----------------------------------------------------
+    def _arm_deadline(self) -> threading.Timer | None:
+        """Stop the worker at the campaign's stop time, even in the middle of a cycle.
+
+        The cycle in progress then ends at the next file boundary and is not
+        counted, so the drive is censored at the cycles it completed by the stop time.
+        """
+        end = self.campaign.stop.end_time
+        if end is None:
+            return None
+        def fire() -> None:
+            # Timer waits can end a few ms before the wall clock reaches ``end`` (Windows
+            # timer resolution), so the deadline is recorded rather than re-read from it.
+            self.deadline_reached = True
+            self.stop.set()
+
+        timer = threading.Timer(max(0.0, (end - datetime.now()).total_seconds()), fire)
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    def _stop_time_reached(self, state: DriveState) -> bool:
+        return self.deadline_reached or self.campaign.stop.reached(state.cycles_done,
+                                                                   datetime.now())
+
+    def _censor(self, state: DriveState) -> None:
+        self._event(state, EventType.CENSORED, "", {"cycles_done": state.cycles_done})
+        self._set_status(state, DriveStatus.CENSORED)
+        self._clean_drive()
+
+    def _clean_drive(self) -> None:
+        """Remove the payload of a cycle cut short by the stop time (best effort)."""
+        mount = find_drive(self.drive_id)
+        if mount is None:
+            return
+        try:  # each removal feeds the watchdog: deleting a small-file cycle takes minutes
+            _remove_tree(mount / PAYLOAD_DIR, self.beat or (lambda: None))
+        except OSError:
+            pass
 
     # -- one iteration --------------------------------------------------------------------
     def _one_cycle(self, state: DriveState) -> None:
         policy = self.campaign.failure
         if self.beat:
             self.beat()
-        if self.campaign.stop.reached(state.cycles_done, datetime.now()):
-            self._event(state, EventType.CENSORED, "", {"cycles_done": state.cycles_done})
-            self._set_status(state, DriveStatus.CENSORED)
+        if self._stop_time_reached(state):
+            self._censor(state)
             return
         mount = wait_for_drive(self.drive_id, policy.reconnect_timeout_s, stop=self.stop)
         if self.stop.is_set():
@@ -219,6 +266,15 @@ class DriveWorker:
                            workload=workload.name, host=self.host, port=self.port,
                            stop=self.stop, progress=self.beat)
         if result.outcome is Outcome.ABORTED:
+            if self._stop_time_reached(state):  # keep what the cut-short cycle had shown
+                self._event(state, EventType.NOTE, "", {
+                    "text": f"stop time reached during cycle {cycle}; the cycle is not counted",
+                    "workload": workload.name, "planned_bytes": result.planned_bytes,
+                    "write_bytes": result.write.bytes, "write_mbps": round(result.write.mbps, 4),
+                    "verify_bytes": result.verify.bytes,
+                    "verify_mbps": round(result.verify.mbps, 4),
+                    "files_corrupt": result.files_corrupt, "files_missing": result.files_missing,
+                    "transient_errors": result.transient_errors})
             return
         self.log.append_cycle(result)
         for event in apply_cycle(state, result, policy):

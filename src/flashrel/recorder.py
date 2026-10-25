@@ -81,8 +81,25 @@ def _needs_newline(path: Path) -> bool:
         return False
 
 
+def _open_append(path: Path, attempts: int = 240):
+    """Open a log for appending; wait while another program holds it.
+
+    On Windows, a log opened in Excel (or held by a backup or sync client) cannot
+    be opened for writing. That is a host event, not a drive failure, so the
+    writer waits up to about a minute instead of failing the cycle.
+    """
+    for attempt in range(attempts):
+        try:
+            return open(path, "a", encoding="utf-8", newline="")
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.25)
+    raise AssertionError("unreachable")
+
+
 def _append(path: Path, text: str) -> None:
-    with open(path, "a", encoding="utf-8", newline="") as fh:
+    with _open_append(path) as fh:
         if _needs_newline(path):
             fh.write("\n")  # isolate a torn line instead of joining it to this record
         fh.write(text)
@@ -93,7 +110,7 @@ def _append(path: Path, text: str) -> None:
 def _append_csv(path: Path, fields: tuple[str, ...], row: dict[str, Any]) -> None:
     new = not path.exists() or path.stat().st_size == 0
     torn = not new and _needs_newline(path)
-    with open(path, "a", encoding="utf-8", newline="") as fh:
+    with _open_append(path) as fh:
         if torn:
             fh.write("\r\n")
         writer = csv.DictWriter(fh, fieldnames=fields)

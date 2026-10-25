@@ -6,8 +6,10 @@
 # brand and the capacity comparisons each have a group on both paths. A8-05 is not
 # under test: it is the spare (reference) drive for port checks after the test.
 #
-# Timeline (all on 23-24 Oct): intake and self-test from 09:00, pilot on S8-01 and
-# A8-01 from 10:00, all eight drives from 12:00, stop on 24 Oct 12:00 (24 h).
+# Timeline (all on 23-24 Oct): planned as intake and self-test from 09:00, pilot on
+# S8-01 and A8-01 from 10:00, all eight drives from 12:00, stop on 24 Oct 12:00 (24 h).
+# As run: intake started at 17:30, so every step moved by eight hours: pilot from
+# 18:00, all eight drives from 20:00, stop on 24 Oct 20:00 (24 h).
 
 campaign: fall2026
 seed: 20261012
@@ -40,7 +42,7 @@ failure:
   intermittent_window: 10    # ... within ten cycles end the drive's life (hard failure)
 
 stop:
-  end_time: 2026-10-24T12:00:00   # local time; drives still running are censored here
+  end_time: 2026-10-24T20:00:00   # local time; drives still running are censored here
 
 assignments:
   S8-01:  {host: W, port: W1}
