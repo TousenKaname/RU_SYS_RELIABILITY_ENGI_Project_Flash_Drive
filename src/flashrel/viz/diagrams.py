@@ -317,7 +317,7 @@ class Milestone:
 
 
 STREAM_COLORS = {"prep": "#A9C0D3", "test": "#2B5C8A", "report": "#D9973F"}
-STREAM_LABELS = {"prep": "preparation", "test": "testing (unattended)", "report": "analysis"}
+STREAM_LABELS = {"prep": "preparation", "test": "testing", "report": "analysis"}
 WEEKEND = "#F5F5F3"
 
 

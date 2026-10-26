@@ -1,6 +1,6 @@
 """The project presentation: one ten-minute deck for the plan, the test, and its results.
 
-    python scripts/make_presentation.py --template ../Proposal/ISE585_Project4_Proposal.pptx \
+    python scripts/make_presentation.py --template ../Proposal/ISE585_Project4_Proposal_v1.pptx \
         --results ../Project/results --text ../Project/deck_text.json \
         --hands data/fall2026/posttest-hands.json \
         --out ../Proposal/ISE585_Project4_Presentation.pptx

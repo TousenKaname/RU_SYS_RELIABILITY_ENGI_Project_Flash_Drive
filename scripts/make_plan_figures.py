@@ -10,7 +10,7 @@ LaTeX) and PNG (preview). The planning curves use the speed assumptions in
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -21,7 +21,7 @@ from flashrel.analysis.planning import cycle_hours, cycles_in, rotation_hours, w
 from flashrel.config import Campaign, load_campaign
 from flashrel.viz import diagrams, style
 
-from planning_assumptions import NOMINAL, TEST_DAYS
+from planning_assumptions import NOMINAL, PLAN_DAY, TEST_DAYS
 
 REPO = Path(__file__).resolve().parents[1]
 CAMPAIGN = REPO / "configs" / "campaign.yaml"
@@ -53,13 +53,14 @@ def _band_label(ax, x: float, text: str, *, y: float = 0.97, va: str = "top",
             color=style.GRAY, linespacing=1.25)
 
 
-def fig_planning(out: Path) -> None:
+def planning_inputs() -> tuple[dict[float, int], dict[float, float]]:
+    """Drives per capacity and the hours of one workload rotation per capacity."""
     drives = drives_by_capacity(load_campaign(CAMPAIGN))
-    hours = {cap: rotation_hours(cap, NOMINAL) for cap in drives}
-    fig, axes = plt.subplots(1, 3, figsize=(style.PAGE_W, 1.95), gridspec_kw={"wspace": 0.5})
+    return drives, {cap: rotation_hours(cap, NOMINAL) for cap in drives}
 
-    # a: full-fill cycles per day against the sustained write speed
-    ax = axes[0]
+
+def panel_rate(ax, drives: dict[float, int], hours: dict[float, float]) -> None:
+    """Full-fill cycles per day against the sustained write speed."""
     speeds = np.linspace(0.5, 15, 300)
     for lo, hi in ((0.5, 2.0), (4.0, 10.0)):
         ax.axvspan(lo, hi, color=style.PAPER, lw=0)
@@ -73,10 +74,10 @@ def fig_planning(out: Path) -> None:
     ax.set_ylim(0, 112)
     ax.set_xlabel("Sustained write speed (MB/s)")
     ax.set_ylabel("Full-fill cycles per day")
-    style.panel_label(ax, "a", x=-0.3)
 
-    # b: expected hard failures by the stop time against the characteristic life
-    ax = axes[1]
+
+def panel_failures(ax, drives: dict[float, int], hours: dict[float, float]) -> None:
+    """Expected hard failures by the stop time against the characteristic life."""
     theta = np.geomspace(10, 1000, 400)
     tau = {cap: cycles_in(TEST_DAYS, hours[cap]) for cap in drives}
 
@@ -99,10 +100,10 @@ def fig_planning(out: Path) -> None:
     ax.set_yticks(range(0, n + 1, 2))
     ax.set_xlabel(r"Characteristic life $\theta$ (cycles)")
     ax.set_ylabel("Expected hard failures in 24 h")
-    style.panel_label(ax, "b", x=-0.3)
 
-    # c: what the test demonstrates if no drive fails (Weibayes, r = 0, 90 %)
-    ax = axes[2]
+
+def panel_bound(ax, drives: dict[float, int], hours: dict[float, float]) -> None:
+    """What the test demonstrates if no drive fails (Weibayes, r = 0, 90 %)."""
     days = np.linspace(0.1, 7, 200)
     chi2 = stats.chi2.ppf(0.90, 2)
     shades = {1.5: style.MIST, 2.0: style.INK, 3.0: style.GRAY}
@@ -120,31 +121,46 @@ def fig_planning(out: Path) -> None:
                         textcoords="offset points", ha="left", va="top", fontsize=5.8)
     ax.axvline(TEST_DAYS, color=style.FAIL, lw=0.6, ls=(0, (1, 1.5)))
     _band_label(ax, TEST_DAYS + 0.15, "stop\n24 h", y=0.62, va="bottom", ha="left")
-    ax.text(0.03, 0.97, "no failures,\n90 % confidence", transform=ax.transAxes, ha="left",
-            va="top", fontsize=5.4, color=style.GRAY, linespacing=1.25)
+    # bottom right, under the lines and clear of the stop line
+    ax.text(0.97, 0.04, "no failures,\n90 % confidence", transform=ax.transAxes, ha="right",
+            va="bottom", fontsize=5.4, color=style.GRAY, linespacing=1.25)
     ax.set_xlim(0, 7)
     ax.set_ylim(bottom=0)
     ax.set_xlabel("Days on test")
     ax.set_ylabel(r"Lower bound on $\theta$ (cycles)")
-    style.panel_label(ax, "c", x=-0.3)
+
+
+PANELS = {"rate": panel_rate, "failures": panel_failures, "bound": panel_bound}
+
+
+def fig_planning(out: Path) -> None:
+    drives, hours = planning_inputs()
+    fig, axes = plt.subplots(1, 3, figsize=(style.PAGE_W, 1.95), gridspec_kw={"wspace": 0.5})
+    for ax, (letter, draw) in zip(axes, zip("abc", PANELS.values())):
+        draw(ax, drives, hours)
+        style.panel_label(ax, letter, x=-0.3)
     style.save(fig, out / "fig_planning", FORMATS, width=style.PAGE_W)
 
 
 # -- schedule --------------------------------------------------------------------------------
-def fig_schedule(out: Path) -> None:
-    T, M, dt = diagrams.Task, diagrams.Milestone, datetime
+def fig_schedule(out: Path, size: tuple[float, float] | None = None,
+                 name: str = "fig_schedule") -> None:
+    """The plan's Gantt chart; ``size`` (inches) draws a smaller copy, e.g. for a slide."""
+    T, M = diagrams.Task, diagrams.Milestone
+
+    def at(hours: float):
+        return PLAN_DAY + timedelta(hours=hours)
     tasks = [
-        T("Intake: format, enroll, self-test", dt(2026, 10, 23, 9), dt(2026, 10, 23, 10), "",
-          "prep"),
-        T("Pilot on two drives", dt(2026, 10, 23, 10), dt(2026, 10, 23, 12), "", "test"),
-        T("Test: eight drives, 24 h", dt(2026, 10, 23, 12), dt(2026, 10, 24, 12), "", "test"),
-        T("Post-test check, export, analysis", dt(2026, 10, 24, 12), dt(2026, 10, 24, 15), "",
-          "report"),
+        T("Intake: format, enroll, self-test", at(9), at(10), "", "prep"),
+        T("Pilot on two drives", at(10), at(12), "", "test"),
+        T("Test: eight drives, 24 h", at(12), at(36), "", "test"),
+        T("Post-test check, export, analysis", at(36), at(39), "", "report"),
     ]
-    milestones = [M("all drives start", dt(2026, 10, 23, 12), "right"),
-                  M("stop, 12:00", dt(2026, 10, 24, 12), "left")]
-    fig = diagrams.schedule_figure(tasks, milestones, dt(2026, 10, 23), dt(2026, 10, 25))
-    style.save(fig, out / "fig_schedule", FORMATS, width=style.PAGE_W)
+    milestones = [M("all drives start", at(12), "right"), M("stop, 12:00", at(36), "left")]
+    fig = diagrams.schedule_figure(tasks, milestones, PLAN_DAY, PLAN_DAY + timedelta(days=2))
+    if size:
+        fig.set_size_inches(size)
+    style.save(fig, out / name, FORMATS, width=size[0] if size else style.PAGE_W)
 
 
 def main() -> None:

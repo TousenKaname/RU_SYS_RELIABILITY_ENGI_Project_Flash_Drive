@@ -1,6 +1,6 @@
 """Final presentation: the proposal deck, updated to the test as run, plus the results.
 
-    python scripts/make_final_deck.py --proposal ../Proposal/ISE585_Project4_Proposal.pptx \
+    python scripts/make_final_deck.py --proposal ../Proposal/ISE585_Project4_Proposal_v1.pptx \
         --results ../Project/results --out ../Proposal/ISE585_Project4_Final.pptx
 
 The proposal deck stays unchanged. The new deck keeps its design (CONTENT layout,

@@ -141,11 +141,23 @@ flashrel analyze C --out reports/fall2026
 python scripts/forensics.py capture C --out data/fall2026/forensics   # failed drives, read-only
 python scripts/make_results.py C --out ../Project/results          # figures, tables, numbers
 python scripts/slide_figures.py C --out ../Project/results/slides  # half-size slide figures
-python scripts/make_presentation.py --template ../Proposal/ISE585_Project4_Proposal.pptx \
+python scripts/make_presentation.py --template ../Proposal/ISE585_Project4_Proposal_v1.pptx \
     --results ../Project/results --text ../Project/deck_text.json \
     --hands data/fall2026/posttest-hands.json \
     --out ../Proposal/ISE585_Project4_Presentation.pptx
 ```
+
+The proposal talk (about 14 minutes, written to be read aloud, with the full script in the
+speaker notes) is built from the test plan on the same design:
+
+```bash
+python scripts/make_proposal_deck.py --template ../Proposal/ISE585_Project4_Proposal_v1.pptx \
+    --figures ../Project/figures/slides --qr ../Project/results/slides/qr_repo.png \
+    --out ../Proposal/ISE585_Project4_Proposal.pptx
+```
+
+`ISE585_Project4_Proposal_v1.pptx` is the first proposal deck. Both decks take their
+theme, layouts, and drive photos from it.
 
 `scripts/check_deck.ps1 -Deck <pptx>` then checks the deck layout through PowerPoint
 (read-only): text that overflows its box or overlaps other text or pictures, and anything
