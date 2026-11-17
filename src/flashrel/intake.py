@@ -2,10 +2,13 @@
 
 Safety comes first, because formatting the wrong disk destroys data. A volume is
 formatted only when every check passes: it sits on the USB bus, it is not on the
-system disk, its size fits the drive's group (+-15 % of the nominal capacity), it is
-not already enrolled as another drive, and the operator picked exactly this volume
-(its USB serial number) for exactly this drive ID. A reused run-1 drive must also show
-its run-1 serial number.
+system disk, it has a file system Windows can read (a RAW, BitLocker-locked or foreign
+volume tells nothing about itself, so it is never formatted by the rig), its size fits
+the drive's group (+-15 % of the nominal capacity), it is not already enrolled as
+another drive, and the operator picked exactly this volume (its USB serial number) for
+exactly this drive ID. A reused run-1 drive must also show its run-1 serial number.
+The format names the volume by its GUID path, and the result is accepted only from the
+same volume and the same USB serial number.
 """
 
 from __future__ import annotations
@@ -102,11 +105,14 @@ def preflight(campaign: Campaign, cstore: CampaignStore, platform: Platform, dri
         problems.append("this volume is on the system disk")
     if serial and info.serial != serial:
         problems.append("the selected volume changed (serial number differs); pick it again")
-    nominal = campaign.nominal_bytes(drive_id)
-    size = vol.total or 0
-    if size and not (1 - SIZE_TOLERANCE) * nominal <= size <= (1 + SIZE_TOLERANCE) * nominal:
-        problems.append(f"size {size / 1e9:.2f} GB does not fit a {nominal / 1e9:.3g} GB drive "
-                        f"({campaign.group_of(drive_id).id}): is this the stick labelled {drive_id}?")
+    if not vol.fs:
+        problems.append("Windows cannot read a file system on this volume (RAW, BitLocker-locked or a "
+                        "foreign format), so its size and content cannot be checked: if it really is a "
+                        "new test stick, format it by hand first (exFAT), then retry")
+    elif not vol.total:
+        problems.append("the size of this volume cannot be read; unplug it, plug it in again and retry")
+    else:
+        problems.extend(_size_problems(campaign, drive_id, vol.total))
     enrolled = enrolled_drives(campaign, cstore)
     ident = read_identity(vol) if vol.fs else None
     for other, intake in enrolled.items():
@@ -131,6 +137,14 @@ def preflight(campaign: Campaign, cstore: CampaignStore, platform: Platform, dri
     return problems, warnings
 
 
+def _size_problems(campaign: Campaign, drive_id: str, size: int) -> list[str]:
+    nominal = campaign.nominal_bytes(drive_id)
+    if (1 - SIZE_TOLERANCE) * nominal <= size <= (1 + SIZE_TOLERANCE) * nominal:
+        return []
+    return [f"size {size / 1e9:.2f} GB does not fit a {nominal / 1e9:.3g} GB drive "
+            f"({campaign.group_of(drive_id).id}): is this the stick labelled {drive_id}?"]
+
+
 def enroll(campaign: Campaign, cstore: CampaignStore, platform: Platform, drive_id: str, *,
            guid: str = "", root: str = "", serial: str = "", progress=lambda text: None) -> dict[str, Any]:
     vol = _find_volume(platform, guid, root)
@@ -149,6 +163,9 @@ def enroll(campaign: Campaign, cstore: CampaignStore, platform: Platform, drive_
         except (Unsupported, OSError, RuntimeError) as exc:
             raise IntakeError(f"format failed: {exc}") from None
         vol = _wait_volume(platform, vol, info.serial)
+        late = _size_problems(campaign, drive_id, vol.total)
+        if late:
+            raise IntakeError(f"after the format: {late[0]} (the stick is formatted but not enrolled)")
     else:
         leftovers = [n for n in os.listdir(vol.root) if n.lower() not in ("system volume information",)]
         if leftovers:
@@ -211,14 +228,20 @@ def enroll(campaign: Campaign, cstore: CampaignStore, platform: Platform, drive_
 
 
 def _wait_volume(platform: Platform, before: Volume, serial: str, timeout: float = 60.0) -> Volume:
+    """The formatted volume: the same GUID path (a format keeps the partition), on the stick
+    with the same USB serial number. A letter alone proves nothing: it moves between sticks."""
     import time
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for vol in platform.list_volumes():
-            if vol.guid == before.guid or (vol.letter and vol.letter == before.letter):
-                if vol.fs:
-                    return vol
+            if vol.guid != before.guid or not vol.fs:
+                continue
+            info = platform.storage_info(vol.root)
+            if serial and (info is None or info.serial != serial):
+                raise IntakeError("after the format a different stick answers at this volume: "
+                                  "nothing was enrolled; check which stick was formatted")
+            return vol
         time.sleep(1.0)
     raise IntakeError("the volume did not come back after the format")
 

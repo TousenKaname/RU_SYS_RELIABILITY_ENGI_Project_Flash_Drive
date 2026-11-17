@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from flashrel.controller import Controller
+from flashrel.controller import Controller, JobRefused
 
 WEB = Path(__file__).resolve().parent / "web"
 # Fixed types: on Windows, mimetypes reads the registry, where ".js" is often text/plain,
@@ -102,7 +102,7 @@ def make_handler(ctrl: Controller):
             path = urlparse(self.path).path
             try:
                 if path == "/api/run/start":
-                    return self._json(ctrl.start_test(force=bool(body.get("force"))))
+                    return self._json(ctrl.start_test(force=body.get("force") is True))  # only a real true
                 if path == "/api/run/end":
                     return self._json(ctrl.end_now(str(body.get("reason", "operator"))))
                 if path == "/api/run/pause":
@@ -126,6 +126,8 @@ def make_handler(ctrl: Controller):
                         return self._json({"error": "confirmation required"}, 400)
                     return self._json(ctrl.request_shutdown())
                 return self._json({"error": "not found"}, 404)
+            except JobRefused as exc:
+                return self._json({"error": str(exc)}, 409)
             except (KeyError, ValueError, TypeError) as exc:
                 return self._json({"error": f"bad request: {exc}"}, 400)
             except Exception as exc:

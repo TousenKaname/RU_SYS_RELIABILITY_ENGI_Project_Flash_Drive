@@ -20,6 +20,10 @@ def local_iso(dt: datetime | None = None) -> str:
 
 
 def parse_iso(text: str) -> datetime:
+    """A recorded timestamp. Anything that is not one (None, a number) is a ValueError,
+    like a malformed string, so one ``except ValueError`` covers every bad record."""
+    if not isinstance(text, str):
+        raise ValueError(f"not a timestamp: {text!r}")
     dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 

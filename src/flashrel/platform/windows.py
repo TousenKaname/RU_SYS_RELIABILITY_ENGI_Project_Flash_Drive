@@ -220,6 +220,11 @@ class WindowsPlatform(Platform):
     def present(self, root: str) -> bool:
         return win32.volume_information(self._volume_root(root)) is not None
 
+    def attached(self, root: str) -> bool:
+        """GetDriveTypeW answers for a RAW or media-less volume too; a volume that left
+        the bus gives DRIVE_NO_ROOT_DIR."""
+        return win32.drive_type(self._volume_root(root)) in (win32.DRIVE_REMOVABLE, win32.DRIVE_FIXED)
+
     def storage_info(self, root: str) -> StorageInfo | None:
         device = win32.device_path_for_root(self._volume_root(root))
         try:
@@ -287,7 +292,9 @@ class WindowsPlatform(Platform):
             raise Unsupported("formatting needs administrator rights")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,11}", label):
             raise ValueError(f"bad volume label {label!r}")
-        target = vol.letter or vol.guid
+        # The GUID path names this one partition; a drive letter can have passed to another
+        # stick since the checks ran.
+        target = vol.guid or vol.letter
         script = FORMAT_PS.replace("__TARGET__", target.replace("'", "''")).replace("__LABEL__", label)
         result = run_powershell(script, timeout=600)
         if not result.get("ok"):

@@ -17,6 +17,7 @@
         trace.csv              progress every minute (throughput within a cycle)
         phase_hist.jsonl       per-file latency histogram of every phase
         control.json           requests from the controller (stop)
+        lost.json              when the worker last saw its volume vanish (hub-event check)
         worker.log             output of the worker process
 
 Every append is flushed and fsync'ed, so a power cut loses at most the cycle in
@@ -61,6 +62,10 @@ HUB_FIELDS = ("time", "hub", "drives_active", "writing", "verifying", "deleting"
 TEMPERATURE_FIELDS = ("time", "source", "location", "celsius", "note")
 
 
+class StoreError(RuntimeError):
+    """A record file exists but cannot be read (held by another program, or damaged)."""
+
+
 # -- low-level file helpers -------------------------------------------------------------------
 def _retry(fn, attempts: int = 120, delay: float = 0.25):
     """Run ``fn``; wait while another program (Excel, antivirus, sync) holds the file."""
@@ -76,7 +81,7 @@ def _retry(fn, attempts: int = 120, delay: float = 0.25):
 
 def atomic_write_text(path: str | Path, text: str) -> None:
     path = str(path)
-    tmp = f"{path}.{os.getpid()}.tmp"
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"  # one per writing thread
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
         fh.flush()
@@ -88,15 +93,26 @@ def atomic_write_json(path: str | Path, obj: Any) -> None:
     atomic_write_text(path, json.dumps(obj, indent=1, sort_keys=True, default=str))
 
 
-def read_json(path: str | Path, default: Any = None) -> Any:
-    for _ in range(20):
+def read_json(path: str | Path, default: Any = None, *, strict: bool = False) -> Any:
+    """The parsed file, or ``default`` when it does not exist.
+
+    A file that exists but stays unreadable (held by a scanner or a sync client, or not
+    JSON) also gives ``default``, unless ``strict``: then it is retried for about 15 s and
+    StoreError is raised, so a state file that is merely held is never taken for a
+    missing one (and overwritten with a fresh state)."""
+    attempts, delay = (60, 0.25) if strict else (20, 0.05)
+    last: Exception | None = None
+    for _ in range(attempts):
         try:
             with open(path, encoding="utf-8") as fh:
                 return json.load(fh)
         except FileNotFoundError:
             return default
-        except (PermissionError, ValueError):  # mid-replace or held by a scanner
-            time.sleep(0.05)
+        except (PermissionError, ValueError) as exc:  # mid-replace or held by a scanner
+            last = exc
+            time.sleep(delay)
+    if strict:
+        raise StoreError(f"{path} exists but cannot be read: {last}")
     return default
 
 
@@ -290,7 +306,7 @@ class DriveStore:
         self.hist_jsonl, self.state_json = p / "phase_hist.jsonl", p / "state.json"
         self.live_json, self.intake_json = p / "live.json", p / "intake.json"
         self.control_json, self.lock_path = p / "control.json", p / ".worker.lock"
-        self.worker_log = p / "worker.log"
+        self.worker_log, self.lost_json = p / "worker.log", p / "lost.json"
 
     def event(self, type_: str, cycle: int, code: str = "", **detail: Any) -> dict[str, Any]:
         record = {"time": iso(), "drive": self.drive_id, "cycle": cycle, "type": type_,
@@ -326,8 +342,8 @@ class DriveStore:
         events.sort(key=lambda e: e.get("time", ""))
         return events
 
-    def load_state(self) -> dict[str, Any] | None:
-        return read_json(self.state_json)
+    def load_state(self, *, strict: bool = False) -> dict[str, Any] | None:
+        return read_json(self.state_json, strict=strict)
 
     def save_state(self, state: dict[str, Any]) -> None:
         state["updated_at"] = iso()
@@ -385,8 +401,8 @@ class CampaignStore:
     def operator(self, action: str, **detail: Any) -> None:
         append_jsonl(self.host_dir / "operator.jsonl", {"time": iso(), "action": action, **detail})
 
-    def run_state(self) -> dict[str, Any]:
-        return read_json(self.run_json, {}) or {}
+    def run_state(self, *, strict: bool = False) -> dict[str, Any]:
+        return read_json(self.run_json, {}, strict=strict) or {}
 
     def save_run_state(self, state: dict[str, Any]) -> None:
         state["updated_at"] = iso()

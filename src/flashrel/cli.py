@@ -41,6 +41,7 @@ def cmd_app(args: argparse.Namespace) -> int:
     from flashrel.controller import AlreadyRunning, Controller
     from flashrel.platform import get_platform
     from flashrel.server import serve
+    from flashrel.store import StoreError
 
     data = Path(args.data)
     data.mkdir(parents=True, exist_ok=True)
@@ -62,6 +63,10 @@ def cmd_app(args: argparse.Namespace) -> int:
         if not args.no_browser:
             platform.open_url(exc.url)
         return 0
+    except StoreError as exc:
+        print(f"FlashRel cannot start: {exc}. Another program (antivirus, a sync client, Excel) "
+              "may hold the file: close it, then start the rig again.", flush=True)
+        return 1
     httpd, url = serve(ctrl, args.port)
     print(f"FlashRel Rig {ctrl.campaign.name} on {platform.name}: {url}", flush=True)
     try:  # the launcher waits for this file to confirm the start

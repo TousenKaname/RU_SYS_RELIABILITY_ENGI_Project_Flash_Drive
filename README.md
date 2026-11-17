@@ -76,5 +76,5 @@ are not measurements.
 python3 tools/build_package.py          # downloads python-3.14.10-embed-{amd64,arm64}.zip once
 ```
 
-Output: `dist/FlashRel-Rig/` and `dist/FlashRel-Rig-v2.0.0.zip`. Copy the folder to
+Output: `dist/FlashRel-Rig/` and `dist/FlashRel-Rig-v2.1.0.zip`. Copy the folder to
 `C:\FlashRel-Rig` on the test PC and double-click `Start FlashRel.bat`.

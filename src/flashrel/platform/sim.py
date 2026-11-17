@@ -10,7 +10,9 @@ dashboard included, on any computer). Nothing here is a measurement.
 Fault modes (drawn per device, triggered after a random number of file operations):
 ``metadata`` (identity/sentinel files rot on the "flash"), ``missing`` (part of a
 directory is lost), ``corrupt`` (read-back returns flipped bits), ``readonly``,
-``disconnect`` (the drive drops off the bus, the first time only briefly) and ``io``.
+``disconnect`` (the drive drops off the bus, the first time only briefly), ``io`` and
+``raw`` (the file system no longer mounts: the stick stays on the bus, but every file
+operation fails, as on Windows for a RAW volume).
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ IDENTITY_NAMES = ("FLASHREL-ID.json", "FLASHREL-SENTINEL.bin")
 PROFILES = {
     "A8": {"capacity": 48 * MiB, "write": 11.5, "read": 16.5, "create_ms": 90, "delete_ms": 300,
            "eta_ops": 2600, "beta": 2.2,
-           "modes": {"metadata": 0.55, "missing": 0.15, "corrupt": 0.15, "disconnect": 0.15}},
+           "modes": {"metadata": 0.45, "raw": 0.1, "missing": 0.15, "corrupt": 0.15, "disconnect": 0.15}},
     "A16": {"capacity": 96 * MiB, "write": 7.0, "read": 12.5, "create_ms": 35, "delete_ms": 40,
             "eta_ops": 7000, "beta": 2.0,
             "modes": {"missing": 0.5, "corrupt": 0.25, "readonly": 0.1, "disconnect": 0.15}},
@@ -180,8 +182,15 @@ class SimPlatform(Platform):
         return dev
 
     def _present(self, dev: dict) -> bool:
+        """On the bus (the volume may still be RAW)."""
         dev = self._settle(dev)
         return os.path.isdir(self._volume_path(dev["serial"]))
+
+    def _unusable(self, serial: str | None, path: str) -> None:
+        if serial and not os.path.isdir(self._volume_path(serial)):
+            raise OSError(errno.ENXIO, "device not configured", path)
+        if serial and self.device(serial).get("raw"):
+            raise OSError(errno.EIO, "the volume does not contain a recognized file system", path)
 
     def unplug(self, serial: str, seconds: float | None) -> None:
         """Take a drive off the bus for ``seconds`` (None = until re-plugged by hand)."""
@@ -263,6 +272,8 @@ class SimPlatform(Platform):
             wear["disconnects"] = 1
             self._save_wear(serial, wear)
             self.unplug(serial, 6.0 / max(1.0, self.speed ** 0.5))
+        elif mode == "raw":
+            self.update_device(serial, raw=True)
 
     def _sleep(self, seconds: float) -> None:
         if seconds > 0:
@@ -275,10 +286,11 @@ class SimPlatform(Platform):
             if not self._present(dev):
                 continue
             root = self._volume_path(dev["serial"]) + os.sep
-            total, free, cluster = self.usage(root)
+            raw = bool(dev.get("raw"))
+            total, free, cluster = (0, 0, 0) if raw else self.usage(root)
             vols.append(Volume(root=root, letter=chr(ord("D") + i) if i < 23 else "",
-                               guid=f"\\\\?\\Volume{{sim-{dev['serial']}}}\\", label=dev.get("label", ""),
-                               fs=dev.get("fs", ""), total=total, free=free, cluster=cluster,
+                               guid=f"\\\\?\\Volume{{sim-{dev['serial']}}}\\", label="" if raw else dev.get("label", ""),
+                               fs="" if raw else dev.get("fs", ""), total=total, free=free, cluster=cluster,
                                removable=True, read_only=bool(dev.get("read_only")),
                                vsn=int(dev["serial"][3:9])))
         return vols
@@ -289,6 +301,7 @@ class SimPlatform(Platform):
         vol = self._volume_path(serial) if serial else root
         if not dev or not os.path.isdir(vol):
             raise OSError(errno.ENXIO, "device not configured", root)
+        self._unusable(serial, root)
         used = 0
         for base, _dirs, files in os.walk(vol):
             for name in files:
@@ -302,11 +315,16 @@ class SimPlatform(Platform):
 
     def is_read_only(self, root: str) -> bool:
         serial = self._serial_of(root)
-        if not serial or not os.path.isdir(self._volume_path(serial)):
+        if not serial:
             raise OSError(errno.ENXIO, "device not configured", root)
+        self._unusable(serial, root)
         return bool(self.device(serial).get("read_only"))
 
     def present(self, root: str) -> bool:
+        serial = self._serial_of(root)
+        return bool(serial) and self._present(self.device(serial)) and not self.device(serial).get("raw")
+
+    def attached(self, root: str) -> bool:
         serial = self._serial_of(root)
         return bool(serial) and self._present(self.device(serial))
 
@@ -325,8 +343,7 @@ class SimPlatform(Platform):
         wear = self._wear(serial) if serial else {}
         name = os.path.basename(path)
         payload = name.endswith(".bin") and name not in IDENTITY_NAMES
-        if serial and not os.path.isdir(self._volume_path(serial)):
-            raise OSError(errno.ENXIO, "device not configured", path)
+        self._unusable(serial, path)
         if payload and wear.get("triggered") and dev.get("mode") == "io":
             raise OSError(errno.EIO, "Input/output error", path)
         if payload and self._rng.random() < TRANSIENT_RATE:
@@ -349,8 +366,7 @@ class SimPlatform(Platform):
     def write_file(self, path: str, chunks: Iterable[bytes], *, sync: bool = True) -> int:
         serial = self._serial_of(path)
         dev = self.device(serial) if serial else {}
-        if serial and not os.path.isdir(self._volume_path(serial)):
-            raise OSError(errno.ENXIO, "device not configured", path)
+        self._unusable(serial, path)
         if dev.get("read_only"):
             raise OSError(errno.EROFS, "Read-only file system", path)
         total = 0
@@ -372,8 +388,7 @@ class SimPlatform(Platform):
         serial = self._serial_of(path)
         if serial:
             dev = self.device(serial)
-            if not os.path.isdir(self._volume_path(serial)):
-                raise OSError(errno.ENXIO, "device not configured", path)
+            self._unusable(serial, path)
             if dev.get("read_only"):
                 raise OSError(errno.EROFS, "Read-only file system", path)
             self._sleep(dev.get("delete_ms", 0) / 1000.0)
@@ -417,7 +432,7 @@ class SimPlatform(Platform):
         for name in os.listdir(path):
             full = os.path.join(path, name)
             shutil.rmtree(full) if os.path.isdir(full) else os.remove(full)
-        self.update_device(serial, fs="exFAT", label=label, read_only=False)
+        self.update_device(serial, fs="exFAT", label=label, read_only=False, raw=False)
         return {"ok": True, "fs": "exFAT", "label": label}
 
     def reset_device(self, instance_id: str) -> dict[str, Any]:

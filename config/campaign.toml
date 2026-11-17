@@ -58,12 +58,13 @@ intermittent_limit = 3    # 3 cycle failures ...
 intermittent_window = 10  # ... within 10 cycles end the drive's life
 device_reset = true       # recovery protocol restarts the USB device (needs administrator)
 check_size = "64MiB"      # recovery and post-test check: write, verify, delete 64 MiB of fresh data
-hub_event_drives = 3      # >= 3 drives of one hub missing at once = hub event (F5, not counted)
+hub_event_drives = 3      # >= 3 drives of one hub vanishing together = hub event (F5, not counted):
+hub_window_s = 30         #    "together" = within 30 s of each other,
+hub_settle_s = 12         #    counted after waiting 12 s for the other drives to notice
 
 [temperature]
 manual = true             # readings typed into the dashboard (IR thermometer, room thermometer)
 acpi = true               # best effort: the PC's ACPI thermal zone, every 10 min
-serial_port = ""          # e.g. "COM3" for the DS18B20 Arduino logger of run 1; empty = off
 
 [hubs]
 names = ["A", "B"]

@@ -236,11 +236,15 @@ class CycleRunner:
         finally:
             res.ended_at = iso()
             res.duration_s = round(time.monotonic() - res.t0, 3)
-        # Corruption found in the read-back is the primary finding even if the delete
-        # phase then failed on the damaged folder (as on the 16 GB drives of run 1).
-        if res.bad_files and res.outcome in (Outcome.PASS, Outcome.FS_FAULT):
+        # A confirmed finding is the outcome of the cycle whatever ended the cycle after it:
+        # the delete failing on the damaged folder (as on the 16 GB drives of run 1), a stop,
+        # a disconnect or an I/O error. Wrong or missing data outranks unreadable files.
+        if res.bad_files:
+            if res.outcome is Outcome.ABORTED:
+                res.errors.append(ErrorRecord(res.phase, "stopped", "", "the cycle was cut short by a "
+                                              "stop request after the finding", 1, False))
             res.outcome = Outcome.CORRUPTION
-        if res.outcome is Outcome.PASS and res.unreadable_files:
+        elif res.unreadable_files and res.outcome in (Outcome.PASS, Outcome.ABORTED):
             res.outcome = Outcome.IO_ERROR
         return res
 
@@ -310,10 +314,14 @@ class CycleRunner:
             try:
                 check = self._attempt("verify", path, check_once)
                 if check.status is FileStatus.CORRUPT:
-                    second = self._attempt("verify", path, check_once)
-                    if second.status is FileStatus.OK:
-                        res.transient_mismatches += 1
-                    check = second
+                    try:
+                        second = self._attempt("verify", path, check_once)
+                    except _FileFailed as failed:  # a re-read that fails does not clear the mismatch
+                        res.errors.append(failed.record)
+                    else:
+                        if second.status is FileStatus.OK:
+                            res.transient_mismatches += 1
+                        check = second
             except _FileFailed as failed:
                 res.errors.append(failed.record)
                 res.unreadable_files += 1
@@ -345,16 +353,40 @@ class CycleRunner:
                     continue
                 path = os.path.join(cycle_dir, *spec.relpath.split("/"))
                 t0 = time.perf_counter()
-                self._attempt("delete", path, lambda p=path: self._remove_if_present(p))
-                stats.add(spec.size, time.perf_counter() - t0)
-                res.dose.files_deleted += 1
+                if self._remove_planned(path):
+                    stats.add(spec.size, time.perf_counter() - t0)
+                    res.dose.files_deleted += 1
+                else:  # read back correctly, gone now: its directory entry was lost (F1)
+                    res.bad_files.append(FileCheck(spec.relpath, FileStatus.MISSING, spec.size, None))
                 self.hooks.progress("delete", 1, 0)
                 self.hooks.periodic("delete")
             self._remove_dir(os.path.join(cycle_dir, *dirname.split("/")))
         self._remove_dir(cycle_dir)
         stats.seconds = time.perf_counter() - t_phase
 
+    def _remove_planned(self, path: str) -> bool:
+        """Delete a file the read-back has just seen. False when the file is not there at
+        the first try: that is a missing file, not a delete. Not found after an earlier
+        attempt failed is accepted (that attempt may have removed it before failing)."""
+        tried = False
+
+        def remove() -> bool:
+            nonlocal tried
+            try:
+                self.platform.remove_file(path)
+                return True
+            except FileNotFoundError:
+                if not self.platform.present(self.root):
+                    raise OSError(0, "volume disappeared", path, 1167) from None
+                return tried
+            except OSError:
+                tried = True
+                raise
+
+        return self._attempt("delete", path, remove)
+
     def _remove_if_present(self, path: str) -> None:
+        """Leftovers of an interrupted cycle: whatever is there goes, absence is fine."""
         try:
             self.platform.remove_file(path)
         except FileNotFoundError:
@@ -437,7 +469,8 @@ class CycleRunner:
         """Run ``action``, retrying OS errors with a linear back-off (5 s, 10 s).
 
         A disconnect, a read-only lock or a full volume ends the cycle at once. A retry
-        that succeeds is logged as a transient error (D3).
+        that succeeds is logged as a transient error (D3). A stop during the back-off ends
+        the cycle as stopped (not counted): the remaining attempts are never rushed.
         """
         attempts = self.spec.retries + 1
         last: ErrorRecord | None = None
@@ -455,6 +488,10 @@ class CycleRunner:
                 if attempt == attempts:
                     raise _FileFailed(last) from None
                 self.sleep(self.spec.retry_backoff_s * attempt)
+                if self.hooks.should_stop():
+                    self.result.errors.append(ErrorRecord(phase, last.kind, last.path, last.detail
+                                                          + " (retries cut short by a stop)", attempt, False))
+                    raise CycleAborted(Outcome.ABORTED, last) from None
                 continue
             if last is not None:
                 self.result.errors.append(ErrorRecord(phase, last.kind, last.path, last.detail,

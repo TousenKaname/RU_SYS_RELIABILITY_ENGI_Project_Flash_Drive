@@ -184,16 +184,22 @@ def selftest(campaign: Campaign, cstore: CampaignStore, platform: Platform, driv
 
 # -- post-test ------------------------------------------------------------------------------------
 def _leftover_cycle(cstore: CampaignStore, drive_id: str, state: dict[str, Any]) -> dict[str, Any] | None:
-    """The cycle whose files should still be on the drive: cut short at the stop, or failed."""
-    events = cstore.drive(drive_id).read_events()
-    cut = [e for e in events if e.get("type") == "interrupted" and e["detail"].get("free_before")]
-    if cut and state.get("status") == Status.CENSORED.value:
+    """The cycle whose files should still be on the drive: the one cut short by the stop,
+    or the failed cycle that ended the drive (a recovered failure's folder was removed)."""
+    ds = cstore.drive(drive_id)
+    if state.get("status") == Status.CENSORED.value:
+        done = max((int(r["cycle"]) for r in ds.read_cycles()), default=0)
+        cut = [e for e in ds.read_events() if e.get("type") == "interrupted"
+               and e["detail"].get("at_stop_time") and e["detail"].get("free_before")
+               and int(e.get("cycle") or 0) > done]
+        if not cut:
+            return None  # the stop fell between two cycles: nothing was left on the drive
         e = cut[-1]
         return {"cycle": e["cycle"], "workload": e["detail"].get("workload"),
                 "free_before": e["detail"]["free_before"],
                 "files_written": int(e["detail"].get("files_written") or 0),
                 "files_deleted": int(e["detail"].get("files_deleted") or 0), "why": "cut short at the stop"}
-    eol = state.get("end_of_life") or state.get("first_failure")
+    eol = state.get("end_of_life")
     if eol:
         rows = {int(r["cycle"]): r for r in cstore.drive(drive_id).read_cycles()}
         row = rows.get(int(eol["cycle"]))
@@ -216,6 +222,11 @@ def verify_leftovers(campaign: Campaign, platform: Platform, vol: Volume, drive_
                       budget_bytes=budget, cluster_size=cluster, chunk_size=campaign.cycle.chunk_size)
     cycle_dir = os.path.join(vol.root, PAYLOAD_DIR, plan.dirname)
     written = plan.files[int(info.get("files_deleted") or 0): int(info.get("files_written") or 0)]
+    if not os.path.isdir(cycle_dir):
+        # The whole folder is gone. Only the rig's own recovery cleanup or a lost root
+        # directory entry can do that; the sentinel result tells which.
+        return {"cycle": plan.cycle, "workload": plan.workload, "why": info.get("why"),
+                "folder_missing": True, "files_on_drive_expected": len(written), "checked": 0}
     counts = {"checked": 0, "ok": 0, "corrupt": 0, "missing": 0, "unreadable": 0, "bytes": 0, "bits_wrong": 0}
     for spec in written:
         if counts["checked"] >= max_files or counts["bytes"] >= max_bytes:

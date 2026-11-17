@@ -17,6 +17,7 @@ only read; nothing is ever written to a drive.
 
 from __future__ import annotations
 
+import errno
 import struct
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
@@ -31,6 +32,14 @@ class ExfatError(ValueError):
 
 class Reader(Protocol):
     def read(self, offset: int, length: int) -> bytes: ...
+
+
+def read_exact(raw: Reader, offset: int, length: int) -> bytes:
+    """``length`` bytes at ``offset``; a short read is an I/O error, never short data."""
+    data = raw.read(offset, length)
+    if len(data) < length:
+        raise OSError(errno.EIO, f"short read at byte {offset}: {len(data)} of {length} bytes")
+    return data
 
 
 def checksum32(data: bytes, skip: frozenset[int] = frozenset()) -> int:
@@ -236,16 +245,18 @@ class VolumeReader:
         self.boot = boot
 
     def boot_region(self, bytes_per_sector: int = 512) -> bytes:
-        return self.raw.read(0, 24 * bytes_per_sector)
+        return read_exact(self.raw, 0, 24 * bytes_per_sector)
 
     def cluster(self, number: int) -> bytes:
         assert self.boot is not None
-        return self.raw.read(self.boot.cluster_offset(number), self.boot.cluster_size)
+        return read_exact(self.raw, self.boot.cluster_offset(number), self.boot.cluster_size)
 
     def fat_entry(self, number: int) -> int:
         assert self.boot is not None
+        if not 0 <= number < self.boot.cluster_count + 2:
+            raise ExfatError(f"FAT entry {number} outside the FAT")
         offset = self.boot.fat_offset * self.boot.bytes_per_sector + 4 * number
-        value, = struct.unpack("<I", self.raw.read(offset, 4))
+        value, = struct.unpack("<I", read_exact(self.raw, offset, 4))
         return value
 
     def chain(self, first: int, length: int | None = None, *, no_fat_chain: bool = False,
@@ -281,9 +292,9 @@ def baseline(raw: Reader, *, identity_name: str, sentinel_name: str) -> dict[str
     Raises ExfatError when the volume does not pass its own checks, in which case the
     raw checks are switched off for that drive (they must never produce false failures).
     """
-    sector0 = raw.read(0, 512)
+    sector0 = read_exact(raw, 0, 512)
     boot = parse_boot(sector0)
-    region = raw.read(0, 24 * boot.bytes_per_sector)
+    region = read_exact(raw, 0, 24 * boot.bytes_per_sector)
     main = boot_region_checksum(region[: 12 * boot.bytes_per_sector], boot.bytes_per_sector)
     if not main["ok"]:
         raise ExfatError(f"boot checksum mismatch at intake ({main})")
@@ -318,16 +329,22 @@ def baseline(raw: Reader, *, identity_name: str, sentinel_name: str) -> dict[str
 
 
 def check(raw: Reader, base: dict[str, Any]) -> dict[str, Any]:
-    """Compare the volume with its intake baseline. Never raises on bad data.
+    """Compare the volume with its intake baseline. Never raises.
 
     Returns ``{"boot": {...}, "upcase": {...}, "rootdir": {...}, "dirty": bool, ...}``
-    where each component has ``ok`` (True, False) and a short ``detail``.
+    where each component has ``ok`` and a short ``detail``. A record that cannot be read
+    at all also has ``error`` True (an I/O error rather than damaged contents).
+
+    The up-case table and the root directory are read where they were at intake (the
+    volume is never formatted again after intake), so a damaged boot sector cannot send
+    the other two checks to the wrong sectors or past the end of the volume.
     """
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"dirty": None}
     geometry = base["geometry"]
-    bps = int(geometry["bytes_per_sector"])
+    known = Boot(**geometry, volume_flags=0, percent_in_use=0)
+    bps = known.bytes_per_sector
     try:
-        region = raw.read(0, 12 * bps)
+        region = read_exact(raw, 0, 12 * bps)
         boot = parse_boot(region[:512])
         cs = boot_region_checksum(region, bps)
         same = boot.geometry() == geometry
@@ -337,10 +354,11 @@ def check(raw: Reader, base: dict[str, Any]) -> dict[str, Any]:
                           f"baseline {base['boot_checksum']:#010x}, geometry same: {same}"}
         result["dirty"] = boot.dirty
         result["percent_in_use"] = boot.percent_in_use
-    except ExfatError as exc:
+    except OSError as exc:
+        result["boot"] = _unreadable("boot region", exc)
+    except (ValueError, struct.error, IndexError, OverflowError) as exc:
         result["boot"] = {"ok": False, "detail": f"boot sector unreadable as exFAT: {exc}"}
-        boot = Boot(**geometry, volume_flags=0, percent_in_use=0)
-    reader = VolumeReader(raw, boot)
+    reader = VolumeReader(raw, known)
     up = base["upcase"]
     try:
         table = reader.chain(up["first_cluster"], up["data_length"])
@@ -348,10 +366,12 @@ def check(raw: Reader, base: dict[str, Any]) -> dict[str, Any]:
         ok = computed == up["checksum"]
         result["upcase"] = {"ok": ok, "detail": "" if ok else
                             f"checksum {computed:#010x} instead of {up['checksum']:#010x}"}
-    except ExfatError as exc:
+    except OSError as exc:
+        result["upcase"] = _unreadable("up-case table", exc)
+    except (ValueError, struct.error, IndexError, OverflowError) as exc:
         result["upcase"] = {"ok": False, "detail": str(exc)}
     try:
-        root = parse_directory(reader.chain(boot.root_cluster))
+        root = parse_directory(reader.chain(known.root_cluster))
         problems = []
         if root.bad_sets or root.unknown:
             problems.append(f"{root.bad_sets} bad entry sets, {root.unknown} stray entries")
@@ -367,6 +387,12 @@ def check(raw: Reader, base: dict[str, Any]) -> dict[str, Any]:
             elif (entry.first_cluster, entry.data_length) != (meta["first_cluster"], meta["data_length"]):
                 problems.append(f"{name} entry changed")
         result["rootdir"] = {"ok": not problems, "detail": "; ".join(problems)}
-    except ExfatError as exc:
+    except OSError as exc:
+        result["rootdir"] = _unreadable("root directory", exc)
+    except (ValueError, struct.error, IndexError, OverflowError) as exc:
         result["rootdir"] = {"ok": False, "detail": str(exc)}
     return result
+
+
+def _unreadable(what: str, exc: OSError) -> dict[str, Any]:
+    return {"ok": False, "error": True, "detail": f"{what} cannot be read: {exc}"[:240]}

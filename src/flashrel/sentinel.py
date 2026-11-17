@@ -36,15 +36,18 @@ from flashrel.verify import bit_flips
 IDENTITY_FILE = "FLASHREL-ID.json"
 SENTINEL_FILE = "FLASHREL-SENTINEL.bin"
 READ_CHUNK = 1024 * 1024
+COMPONENTS = ("identity", "sentinel", "boot", "upcase", "rootdir")
+RAW_COMPONENTS = {"boot", "upcase", "rootdir"}
 
 
 @dataclass
 class SentinelResult:
     time: str
     ok: bool
-    failed: str = ""           # identity, sentinel, boot, upcase, rootdir, vanished
+    failed: str = ""           # identity, sentinel, boot, upcase, rootdir, vanished, filesystem
     code: str = ""             # F1 data at rest, F6 file-system records, F2 read error, F3 gone
     detail: str = ""
+    failed_all: list[str] = field(default_factory=list)  # every component the finding covers
     components: dict[str, dict[str, Any]] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     reads: int = 1
@@ -141,16 +144,20 @@ class SentinelChecker:
                 comps[comp] = {"ok": False, "missing": True, "detail": f"{name} not found"}
             except OSError as exc:
                 comps[comp] = {"ok": False, "error": True, "detail": f"{name}: {exc}"}
-        if self.baseline is not None and (only is None or only & {"boot", "upcase", "rootdir"}):
+        if self.baseline is not None and (only is None or only & RAW_COMPONENTS):
+            # Only failing to open the volume makes the raw check unavailable. A record that
+            # cannot be read once the volume is open is a finding (exfat.check reports it).
             try:
-                with self.platform.raw_volume(vol) as raw:
+                handle = self.platform.raw_volume(vol)
+            except (OSError, Unsupported) as exc:
+                comps["_raw_unavailable"] = {"ok": True, "detail": str(exc)[:200]}
+            else:
+                with handle as raw:
                     raw_result = exfat.check(raw, self.baseline["record"])
                 for comp in ("boot", "upcase", "rootdir"):
                     if (only is None or comp in only) and comp not in skip:
                         comps[comp] = raw_result[comp]
                 comps.setdefault("_info", {})["dirty"] = raw_result.get("dirty")
-            except (OSError, Unsupported, exfat.ExfatError) as exc:
-                comps["_raw_unavailable"] = {"ok": True, "detail": str(exc)[:200]}
         return comps
 
     def check(self, vol: Volume, skip: set[str] = frozenset()) -> SentinelResult:
@@ -184,25 +191,32 @@ class SentinelChecker:
         if "_raw_unavailable" in comps:
             result.warnings.append(f"raw check unavailable: {comps['_raw_unavailable']['detail']}")
         if bad:
+            result.ok = False
             if not self.platform.present(vol.root):
-                result.ok, result.failed, result.code = False, "vanished", "F3"
-                result.detail = "the volume disappeared during the check"
+                if self.platform.attached(vol.root):
+                    # Still on the bus, but Windows can no longer read a file system on it
+                    # (RAW or no media): what run 1's failed A8 sticks did.
+                    result.failed, result.code = "filesystem", "F6"
+                    result.detail = "the volume is attached but its file system cannot be read (RAW or no media)"
+                else:
+                    result.failed, result.code = "vanished", "F3"
+                    result.detail = "the volume disappeared during the check"
             else:
-                result.ok = False
                 result.failed, result.code = _classify(bad, comps)
+                result.failed_all = [c for c in COMPONENTS if c in bad]
                 result.detail = "; ".join(f"{c}: {_short(comps[c])}" for c in sorted(bad))
         result.elapsed_s = round(time.monotonic() - t0, 3)
         return result
 
 
 def _classify(bad: set[str], comps: dict[str, dict[str, Any]]) -> tuple[str, str]:
-    """Most specific finding first: wrong data at rest (F1), then file-system records (F6),
-    then a file that cannot be read at all (F2)."""
+    """Most specific finding first: wrong data at rest (F1), then damaged file-system
+    records (F6), then a file or record that cannot be read at all (F2)."""
     for comp in ("identity", "sentinel"):
         if comp in bad and comps[comp].get("bad_bytes"):
             return comp, "F1"
     for comp in ("boot", "upcase", "rootdir"):
-        if comp in bad:
+        if comp in bad and not comps[comp].get("error"):
             return comp, "F6"
     for comp in ("identity", "sentinel"):
         if comp in bad and comps[comp].get("missing"):

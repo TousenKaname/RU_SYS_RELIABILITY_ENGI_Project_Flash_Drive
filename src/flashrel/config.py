@@ -61,13 +61,14 @@ class FailurePolicy:
     device_reset: bool = True
     check_bytes: int = 64 * MiB
     hub_event_drives: int = 3
+    hub_window_s: float = 30.0    # drives that vanish within this many seconds of each other ...
+    hub_settle_s: float = 12.0    # ... counted after waiting this long for the others to notice
 
 
 @dataclass(frozen=True)
 class TemperatureSpec:
     manual: bool = True
     acpi: bool = True
-    serial_port: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,10 +233,11 @@ def parse_campaign(data: dict[str, Any]) -> Campaign:
         device_reset=bool(f.get("device_reset", True)),
         check_bytes=parse_size(f.get("check_size", "64MiB")),
         hub_event_drives=int(f.get("hub_event_drives", 3)),
+        hub_window_s=float(f.get("hub_window_s", 30)),
+        hub_settle_s=float(f.get("hub_settle_s", 12)),
     )
     t = data.get("temperature", {})
-    temperature = TemperatureSpec(manual=bool(t.get("manual", True)), acpi=bool(t.get("acpi", True)),
-                                  serial_port=str(t.get("serial_port", "")))
+    temperature = TemperatureSpec(manual=bool(t.get("manual", True)), acpi=bool(t.get("acpi", True)))
     h = data.get("hubs", {})
     groups = {}
     for g in data.get("group", []):
@@ -340,6 +342,6 @@ def for_simulation(c: Campaign, *, duration_h: float = 0.5, speed: float = 1.0) 
         sentinel=dataclasses.replace(c.sentinel, interval_s=20.0, file_size=256 * KiB,
                                      confirm_gap_s=0.5),
         failure=dataclasses.replace(c.failure, reconnect_timeout_s=8.0, hang_timeout_s=90.0,
-                                    check_bytes=2 * MiB),
+                                    check_bytes=2 * MiB, hub_window_s=10.0, hub_settle_s=3.0),
         sim={"speed": speed},
     )

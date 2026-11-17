@@ -1,27 +1,39 @@
 """One worker process per drive: cycles until the drive fails, needs the operator, or is censored.
 
 The logs are the record of truth. The worker saves its state right after logging a
-cycle; on start it finds a cycle that was in progress when a previous worker or the host
-died, logs it as interrupted (not counted) together with the wear it caused, and
-continues with the next cycle.
+cycle; on start it brings a state that missed the last cycle row up to that row, finds a
+cycle that was in progress when a previous worker or the host died, logs it as
+interrupted (not counted) together with the wear it caused, and continues.
 
 Recovery protocol after a cycle failure (automatic; the drive is never repaired):
 
 1. wait up to 2 min for the drive to be present again;
 2. restart the USB device (``pnputil /restart-device``, the software equivalent of
    re-plugging it) and wait for it to come back;
-3. read-only? capacity changed? -> end of life (F4 / F6);
+3. no readable file system? -> attention; read-only? capacity changed? -> end of life
+   (F4 / F6);
 4. check the data at rest and the file-system records (sentinel);
 5. write, verify and delete 64 MiB of fresh data in ``FLASHREL-CHECK`` (the leftovers of
    the failed cycle are NOT removed first, unlike run 1);
-6. try to remove the failed cycle's folder; a folder that cannot be removed is
-   quarantined and left alone from then on.
+6. passed: remove the failed cycle's folder (retried like any delete; a folder that still
+   cannot be removed is quarantined and left alone from then on). Not passed: the folder
+   stays on the drive as evidence for the post-test protocol.
 
 A drive that passes step 5 keeps cycling and the failure is intermittent (D2); a drive
 that does not stops in the *attention* state until the post-test protocol (re-check on
 another port, port check with a spare). Three cycle failures within ten cycles end its
-life. When three or more drives of one hub vanish together, the event is a hub fault
-(F5): it is not counted, and the drives wait for the hub to come back.
+life.
+
+Hub events: when a drive vanishes, its worker records the moment (``lost.json``) and,
+after a short settle time, counts the drives of the same hub that vanished within
+``hub_window_s`` of it (their own records and the controller's presence scans). Three or
+more is a hub event (F5): not counted, and the drive waits for the hub. A drive that does
+not return within the reconnect timeout after the hub's other drives are back has failed
+on its own (F3).
+
+Every wait loop of the main thread advances the ``beat`` in live.json, so the
+controller's hang watchdog can watch every phase: a blocking call that does not return
+for 10 min is a hang (F3) wherever it happens.
 """
 
 from __future__ import annotations
@@ -34,6 +46,7 @@ import threading
 import time
 import traceback
 import uuid
+from datetime import datetime
 from typing import Any
 
 from flashrel import __version__
@@ -43,16 +56,22 @@ from flashrel.failure import (CODES, FINAL, FROM_CODE, Dose, DriveState, Outcome
                               life_record, limit_reached, track_throughput)
 from flashrel.payload import CHECK_DIR, PAYLOAD_DIR, fill_budget, plan_cycle
 from flashrel.platform import Platform, Unsupported, Volume, get_platform
-from flashrel.sentinel import SentinelChecker, SentinelResult, locate, read_identity
-from flashrel.store import CampaignStore, DriveStore, FileLock, read_json
+from flashrel.sentinel import COMPONENTS, SentinelChecker, SentinelResult, locate, read_identity
+from flashrel.store import CampaignStore, DriveStore, FileLock, StoreError, atomic_write_json, read_json
 from flashrel.timeutil import iso, parse_iso, utc_now
 from flashrel.units import KiB, MiB, mb_per_s
 
 CHECK_WORKLOAD = Workload("check", 64 * KiB, 8 * MiB, 64)
 CONTROLLER_STALE_S = 180.0
+PRESENCE_STALE_S = 90.0
 LIVE_PERIOD_S = 2.0
 TRACE_PERIOD_S = 60.0
-IO_PHASES = {"setup", "write", "verify", "delete", "check", "sentinel"}
+IO_PHASES = {"setup", "write", "verify", "delete", "check", "sentinel", "cleanup"}
+UNWATCHED_PHASES = {"starting", "stopped"}  # the hang watchdog watches every other phase
+
+
+class _Stopped(Exception):
+    """A stop request arrived during a step that is resumed or redone later."""
 
 
 class Live:
@@ -70,7 +89,16 @@ class Live:
 
     def update(self, **values: Any) -> None:
         with self.lock:
+            if "phase" in values and values["phase"] != self.data.get("phase"):
+                self.data["beat"] += 1  # a new phase is progress too
+                self.data["phase_started"] = iso()
             self.data.update(values)
+            self.dirty = True
+
+    def beat(self) -> None:
+        """The main thread is alive and not stuck: every wait loop calls this."""
+        with self.lock:
+            self.data["beat"] += 1
             self.dirty = True
 
     def phase(self, name: str, **info: Any) -> None:
@@ -126,9 +154,8 @@ class Worker:
         self.sleep_fn = sleep
         self.policy = campaign.failure
         self.slot = campaign.slot_of(drive_id)
-        self.run = cstore.run_state()
-        self.stop_at = parse_iso(self.run["stop_at"]) if self.run.get("stop_at") else None
-        self.started_at = parse_iso(self.run["started_at"]) if self.run.get("started_at") else utc_now()
+        self.stop_at: datetime | None = None        # both read from run.json in main()
+        self.started_at: datetime = utc_now()
         self.stop = threading.Event()
         self.stop_reason = ""
         self.deadline_hit = False
@@ -143,6 +170,7 @@ class Worker:
         self._serial_noted = False
         self._recovery_interrupted = False
         self._last_root = ""
+        self._lost_at: datetime | None = None  # when _find first missed the drive
 
     # -- entry point ------------------------------------------------------------------------
     def main(self) -> int:
@@ -152,11 +180,19 @@ class Worker:
             return 3
         watcher = threading.Thread(target=self._watch, daemon=True)
         try:
-            self.intake = self.ds.load_intake() or {}
-            if not self.intake:
-                print(f"{self.drive_id}: not enrolled (no intake.json)", flush=True)
-                return 2
-            self.state = self._load_state()
+            try:
+                run = self.cstore.run_state(strict=True)
+                self.stop_at = parse_iso(run["stop_at"]) if run.get("stop_at") else None
+                if run.get("started_at"):
+                    self.started_at = parse_iso(run["started_at"])
+                self.intake = read_json(self.ds.intake_json, {}, strict=True) or {}
+                if not self.intake:
+                    print(f"{self.drive_id}: not enrolled (no intake.json)", flush=True)
+                    return 2
+                self.state = self._load_state()
+            except StoreError as exc:  # never start from a fresh state over a held one
+                print(f"{self.drive_id}: {exc}; the controller restarts this worker later", flush=True)
+                return 4
             self.checker = SentinelChecker(self.platform, self.intake, self.c.sentinel,
                                            sleep=self._sleep, cancelled=self.stop.is_set)
             watcher.start()
@@ -191,18 +227,49 @@ class Worker:
         return 0
 
     def _load_state(self) -> DriveState:
-        raw = self.ds.load_state()
+        raw = self.ds.load_state(strict=True)
         state = DriveState.from_json(raw) if raw else DriveState(self.drive_id)
-        # The logs win over a state file that missed the last cycle (crash in between).
-        rows = self.ds.read_cycles()
-        last = max((int(r["cycle"]) for r in rows), default=0)
-        if last > state.cycles_done:
-            state.cycles_done = last
+        self._reconcile(state)
         if state.status == Status.ENROLLED.value:
             state.status = Status.ACTIVE.value
         if state.status in (Status.RECOVERING.value, Status.PAUSED.value) and not state.pending_recovery:
             state.status = Status.ACTIVE.value
         return state
+
+    def _reconcile(self, state: DriveState) -> None:
+        """The cycle rows win over a state file that missed the last one (the worker died
+        between writing the row and saving the state): the cycle count, the wear and, for
+        a failed cycle, its failure and the recovery protocol still to run."""
+        rows = self.ds.read_cycles()
+        if not rows:
+            return
+        last = max(rows, key=lambda r: int(r["cycle"]))
+        n = int(last["cycle"])
+        if n <= state.cycles_done:
+            return
+        state.cycles_done = n
+        if state.in_progress and int(state.in_progress.get("cycle") or 0) <= n:
+            state.in_progress = None  # that cycle ended: its row is written
+        state.last_outcome = last.get("outcome") or state.last_outcome
+        for column, name in (("cum_bytes_written", "bytes_written"), ("cum_bytes_read", "bytes_read"),
+                             ("cum_files_created", "files_created"), ("cum_files_deleted", "files_deleted")):
+            value = _int(last.get(column))
+            if value > getattr(state.cum, name):
+                setattr(state.cum, name, value)
+        code, outcome = last.get("code") or "", last.get("outcome") or ""
+        if code and code != "F5" and outcome not in ("pass", "aborted", "interrupted", "hub_fault") \
+                and n not in state.failure_cycles:
+            phase = _row_phase(last)
+            state.failure_cycles.append(n)
+            if state.first_failure is None:
+                state.first_failure = life_record(n, code, last.get("ended_at") or iso(), state.cum,
+                                                  _float(last.get("hours_on_test")), phase=phase,
+                                                  outcome=outcome)
+            if state.status not in FINAL:
+                state.status = Status.RECOVERING.value
+                state.pending_recovery = {"cycle": n, "code": code, "phase": phase, "detail": {}}
+        self.ds.event("note", n, text=f"state brought up to cycle {n} from cycles.csv (the last worker "
+                                      "stopped between writing the row and saving the state)")
 
     def _save(self) -> None:
         self.ds.save_state(self.state.to_json())
@@ -279,13 +346,9 @@ class Worker:
         return self.state.cum.bytes_written / total if total else 0.0
 
     # -- locating the drive -----------------------------------------------------------------
-    def _locate_fast(self) -> Volume | None:
-        """Check the volume this drive had last time first: a normal cycle start then never
-        touches the other sticks (one of which may be hanging)."""
-        if not self._last_root:
-            return None
+    def _mine_at(self, root: str) -> Volume | None:
         try:
-            vol = self.platform.volume_at(self._last_root)
+            vol = self.platform.volume_at(root)
         except OSError:
             return None
         if vol is None or not vol.fs:
@@ -295,49 +358,169 @@ class Worker:
             return vol
         return None
 
+    def _locate_quick(self) -> tuple[Volume | None, str]:
+        """The drive at its last volume, or where the controller's last scan saw it: a
+        normal cycle start never touches the other sticks (one of which may be hanging)."""
+        hint = (self._presence().get(self.drive_id) or {}).get("root") or ""
+        for root in dict.fromkeys(r for r in (self._last_root, hint) if r):
+            vol = self._mine_at(root)
+            if vol is not None:
+                return vol, "identity"
+        return None, ""
+
     def _find(self, wait: float = 0.0) -> tuple[Volume | None, str]:
+        """Find the drive (quick look first, then a scan of every volume: identity file,
+        then USB serial), waiting up to ``wait`` s for it to come back. When it is missing
+        at the first look, that moment goes to ``_lost_at`` and lost.json."""
         deadline = time.monotonic() + wait
+        first = True
         while True:
-            fast = self._locate_fast()
-            vol, how = (fast, "identity") if fast is not None else locate(self.platform, self.drive_id, self.intake)
+            self.live.beat()
+            vol, how = self._locate_quick()
+            if vol is None:
+                vol, how = self._scan()
             if vol is not None:
                 self._last_root = vol.root
-            if vol is not None or time.monotonic() >= deadline or self.stop.is_set():
+                self._lost_at = None
                 return vol, how
-            if self._hub_event():
-                return None, "hub"
+            if first:
+                first = False
+                self._lost_at = utc_now()
+                self._note_lost(self._lost_at)
+            if time.monotonic() >= deadline or self.stop.is_set():
+                return None, ""
             self._sleep(min(3.0, max(0.2, deadline - time.monotonic())))
 
-    def _hub_event(self) -> bool:
-        """True when the controller sees >= N drives of this drive's hub missing at once."""
-        if self.slot is None:
-            return False
+    def _scan(self) -> tuple[Volume | None, str]:
+        """A look at every volume. Marked in live.json: a scan that hangs may be held up by
+        another stick, which the hang watchdog takes into account."""
+        self.live.update(scan=True)
+        try:
+            return locate(self.platform, self.drive_id, self.intake)
+        finally:
+            self.live.update(scan=False)
+
+    def _presence(self) -> dict[str, dict[str, Any]]:
+        """The controller's last presence scan, per drive ({} when older than 90 s)."""
         presence = read_json(self.cstore.presence_json, {}) or {}
         try:
-            if (utc_now() - parse_iso(presence["time"])).total_seconds() > 90:
-                return False  # the controller's scan is stuck: no basis for a hub event
+            if (utc_now() - parse_iso(presence["time"])).total_seconds() > PRESENCE_STALE_S:
+                return {}
         except (KeyError, ValueError, TypeError):
-            return False
-        drives = presence.get("drives", {})
-        missing = [d for d, p in drives.items() if p.get("hub") == self.slot.hub and not p.get("present")
-                   and p.get("expected")]
-        return len(missing) >= self.policy.hub_event_drives
+            return {}
+        return presence.get("drives") or {}
 
-    def _wait_hub(self, cycle: int, detail: dict[str, Any]) -> None:
-        """A hub event (F5, not counted): wait until the drive is back, then carry on."""
-        self.ds.event("hub_event", cycle, "F5", **detail,
+    def _note_lost(self, when: datetime) -> None:
+        """Tell the other workers of the hub when this drive vanished (one record per
+        disappearance: a later look within the hub window keeps the first moment)."""
+        prev = read_json(self.ds.lost_json, {}) or {}
+        try:
+            if 0 <= (when - parse_iso(prev["time"])).total_seconds() <= self.policy.hub_window_s:
+                return
+        except (KeyError, ValueError, TypeError):
+            pass
+        try:
+            atomic_write_json(self.ds.lost_json, {"time": iso(when), "drive": self.drive_id})
+        except OSError:
+            pass
+
+    def _hub_mates_lost(self, lost_at: datetime) -> list[str]:
+        """The other drives of this hub that vanished within hub_window_s of ``lost_at``,
+        by their workers' lost.json and by the controller's presence scans."""
+        if self.slot is None:
+            return []
+        window = self.policy.hub_window_s
+        presence = self._presence()
+
+        def near(stamp: Any) -> bool:
+            try:
+                return abs((parse_iso(stamp) - lost_at).total_seconds()) <= window
+            except (TypeError, ValueError):
+                return False
+
+        mates = []
+        for s in self.c.slots:
+            if s.hub != self.slot.hub or s.drive == self.drive_id:
+                continue
+            lost = read_json(self.cstore.dir / "drives" / s.drive / "lost.json", {}) or {}
+            seen = presence.get(s.drive) or {}
+            gap = seen.get("last_missing") or {}
+            try:  # a gap the controller saw that overlaps the window around lost_at
+                overlap = ((parse_iso(gap["from"]) - lost_at).total_seconds() <= window
+                           and (lost_at - parse_iso(gap["to"])).total_seconds() <= window)
+            except (KeyError, TypeError, ValueError):
+                overlap = False
+            # Presence evidence only for drives still on test: a retired stick that keeps
+            # dropping in and out must not make every disconnect on its hub look like a hub event.
+            if near(lost.get("time")) or (seen.get("expected") and (near(seen.get("missing_since")) or overlap)):
+                mates.append(s.drive)
+        return mates
+
+    def _hub_event(self, lost_at: datetime | None) -> bool:
+        """True when this drive and at least hub_event_drives - 1 others of its hub vanished
+        within hub_window_s of each other: a hub or power event (F5, not counted). Waits up
+        to hub_settle_s, so the other workers and the controller's scan see it too."""
+        if self.slot is None or lost_at is None:
+            return False
+        need = self.policy.hub_event_drives - 1
+        end = time.monotonic() + self.policy.hub_settle_s
+        while True:
+            self.live.beat()
+            if len(self._hub_mates_lost(lost_at)) >= need:
+                return True
+            left = end - time.monotonic()
+            if left <= 0 or self.stop.is_set():
+                return False
+            self._sleep(min(2.0, left))
+
+    def _unmounted(self) -> Volume | None:
+        """The drive's volume when it is on the bus without a readable file system."""
+        vol, _how = self._scan()
+        return vol if vol is not None and not vol.fs else None
+
+    def _hub_back(self, mates: list[str]) -> bool:
+        presence = self._presence()
+        return any((presence.get(d) or {}).get("present") for d in mates)
+
+    def _wait_hub(self, cycle: int, lost_at: datetime, where: str) -> str:
+        """A hub event (F5, not counted): wait for the hub. Returns "back" when this drive
+        is back; "lost" when the hub's other drives came back and this one did not within
+        reconnect_timeout_s (a failure of its own); "stopped" on a stop request."""
+        mates = self._hub_mates_lost(lost_at)
+        self.ds.event("hub_event", cycle, "F5", where=where, lost_at=iso(lost_at),
+                      drives=sorted(mates + [self.drive_id]),
                       text="several drives of this hub vanished at once; not counted against the drive")
-        self.state.status = Status.PAUSED.value
+        st = self.state
+        before = st.status
+        st.status = Status.PAUSED.value
         self._save()
-        self.live.update(phase="paused (hub)")
-        while not self.stop.is_set():
-            vol, how = locate(self.platform, self.drive_id, self.intake)
-            if vol is not None:
-                self.ds.event("note", cycle, text=f"drive back after the hub event (found by {how})")
-                break
-            self._sleep(5.0)
-        self.state.status = Status.ACTIVE.value
-        self._save()
+        self.live.update(phase="paused (hub)", context="hub")
+        period = max(0.5, min(5.0, self.policy.reconnect_timeout_s / 4))
+        hub_back: float | None = None
+        next_scan = 0.0
+        try:
+            while not self.stop.is_set():
+                self.live.beat()
+                vol, how = self._locate_quick()
+                if vol is None and time.monotonic() >= next_scan:
+                    next_scan = time.monotonic() + 30.0
+                    vol, how = self._scan()
+                if vol is not None:
+                    self._last_root, self._lost_at = vol.root, None
+                    self.ds.event("note", cycle, text=f"drive back after the hub event (found by {how})")
+                    return "back"
+                if hub_back is None:
+                    if self._hub_back(mates):
+                        hub_back = time.monotonic()
+                elif time.monotonic() - hub_back >= self.policy.reconnect_timeout_s:
+                    self.ds.event("note", cycle, text="the hub's other drives are back, this one is not")
+                    return "lost"
+                self._sleep(period)
+            return "stopped"
+        finally:
+            if st.status == Status.PAUSED.value:
+                st.status = before if before != Status.PAUSED.value else Status.ACTIVE.value
+                self._save()
 
     # -- sentinel ---------------------------------------------------------------------------
     def _sentinel(self, vol: Volume, phase: str) -> SentinelResult:
@@ -363,6 +546,7 @@ class Worker:
             self.ds.event("sentinel_warning", self.state.cycles_done, warnings=result.warnings[:5])
         self.live.update(last_sentinel={"time": result.time, "ok": result.ok, "failed": result.failed,
                                         "detail": result.detail[:200]}, phase=prev_phase)
+        self.live.beat()
         self.next_sentinel = time.monotonic() + self.c.sentinel.interval_s
         return result
 
@@ -383,21 +567,30 @@ class Worker:
     # -- one iteration ----------------------------------------------------------------------
     def _iteration(self) -> None:
         cycle = self.state.cycles_done + 1
-        self.live.update(status=self.state.status, phase="locating", cycle=cycle)
+        self.live.update(status=self.state.status, phase="locating", context="start", cycle=cycle)
         vol, how = self._find(wait=self.policy.reconnect_timeout_s)
         if self.stop.is_set():
             return
-        if how == "hub":
-            self._wait_hub(cycle, {"where": "start of the cycle"})
-            return
         if vol is None:
-            self._failed_without_run(cycle, Outcome.DISCONNECTED, "drive not found at the start of the cycle")
+            lost_at = self._lost_at or utc_now()
+            reason = "drive not found at the start of the cycle"
+            if self._hub_event(lost_at):
+                if self._wait_hub(cycle, lost_at, "start of the cycle") != "lost":
+                    return
+                reason = "did not come back after the hub event, although the hub's other drives did"
+                lost_at = None  # that hub event is settled: the recovery does not look at it again
+            self._failed_without_run(cycle, Outcome.DISCONNECTED, reason, lost_at=lost_at)
+            return
+        if not vol.fs:  # found by its USB serial, but Windows cannot read a file system on it
+            self._failed_without_run(cycle, Outcome.FS_FAULT,
+                                     "the volume has no readable file system (RAW or no media)")
             return
         self.live.update(mount=vol.display, letter=vol.letter, phase="sentinel")
         result = self._sentinel(vol, "cycle-start")
         if not result.ok:
-            if result.code == "F3":
-                return  # vanished during the check: the next iteration decides
+            if result.code == "F3":  # vanished during the check: the next iteration looks for it
+                self._sleep(2.0)
+                return
             self._failed_without_run(cycle, FROM_CODE.get(result.code, Outcome.FS_FAULT),
                                      f"start-of-cycle check: {result.detail}", sentinel=result.to_json())
             return
@@ -434,7 +627,7 @@ class Worker:
         self.state.in_progress = {"cycle": cycle, "workload": workload.name, "started_at": iso()}
         self._save()
         self.cycle_sentinel = {"checks": 0, "warnings": 0}
-        self.live.update(cycle=cycle, workload=workload.name, cycle_started=iso())
+        self.live.update(cycle=cycle, workload=workload.name, cycle_started=iso(), context="cycle")
         runner = CycleRunner(self.platform, vol.root, self._planner(cycle, workload), self.c.cycle,
                              drive_id=self.drive_id, cycle=cycle, workload=workload.name,
                              hooks=self._hooks(vol), quarantined=set(self.state.quarantined),
@@ -447,14 +640,27 @@ class Worker:
         if result.outcome is Outcome.ABORTED:
             self._log_interrupted(result, self.stop_reason or "stopped")
             return
-        if result.outcome is Outcome.DISCONNECTED and self._hub_event():
-            result.outcome = Outcome.HUB_FAULT
-            self._log_interrupted(result, "hub event")
-            self._wait_hub(cycle, {"where": f"{result.phase} phase of cycle {cycle}"})
-            return
+        lost_at = None
+        if result.outcome is Outcome.DISCONNECTED:
+            lost_at = parse_iso(result.ended_at)
+            self._note_lost(lost_at)
+            if self._hub_event(lost_at):
+                result.outcome = Outcome.HUB_FAULT
+                self._log_interrupted(result, "hub event")
+                if self._wait_hub(cycle, lost_at, f"{result.phase} phase of cycle {cycle}") == "lost":
+                    self._failed_without_run(cycle, Outcome.DISCONNECTED, "did not come back after the hub "
+                                             "event, although the hub's other drives did", phase=result.phase)
+                return
+            raw = self._unmounted()
+            if raw is not None:  # still on the bus: its file system went, not the stick (F6)
+                result.outcome = Outcome.FS_FAULT
+                result.errors.append(ErrorRecord(result.phase, "unmounted", raw.display,
+                                                 "the stick is still on the bus but its file system no "
+                                                 "longer mounts (RAW or no media)", 1, False))
+                lost_at = None
         self._record_cycle(result)
         if result.outcome.is_failure:
-            self._recover(cycle, result.code, result.phase, self._failure_detail(result))
+            self._recover(cycle, result.code, result.phase, self._failure_detail(result, lost_at=lost_at))
 
     def _log_interrupted(self, result: CycleResult, reason: str) -> None:
         cut = self._deadline()
@@ -530,8 +736,9 @@ class Worker:
                           dose=st.cum.to_json(), hours_on_test=self._hours(), fdw=round(self._fdw(), 4))
         self._save()
 
-    def _failure_detail(self, r: CycleResult) -> dict[str, Any]:
+    def _failure_detail(self, r: CycleResult, lost_at: datetime | None = None) -> dict[str, Any]:
         return {
+            "lost_at": iso(lost_at) if lost_at else None,
             "outcome": r.outcome.value, "workload": r.workload, "phase": r.phase,
             "errors": [e.__dict__ for e in r.errors if not e.recovered][:20],
             "bad_files": [{"file": c.relpath, "status": c.status.value, "bytes": c.bytes_diff,
@@ -543,23 +750,26 @@ class Worker:
         }
 
     def _failed_without_run(self, cycle: int, outcome: Outcome, reason: str,
-                            sentinel: dict[str, Any] | None = None) -> None:
-        """A cycle that could not start (drive missing, damage found at its start) is a failed cycle."""
+                            sentinel: dict[str, Any] | None = None, lost_at: datetime | None = None,
+                            phase: str = "start") -> None:
+        """A cycle that could not start or finish (drive missing, damage found at its start,
+        not back after a hub event) is a failed cycle."""
         now = iso()
         r = CycleResult(drive_id=self.drive_id, cycle=cycle,
                         workload=self.c.workload_for_cycle(cycle).name, started_at=now, ended_at=now,
-                        outcome=outcome, phase="start", sentinel=sentinel)
-        r.errors.append(ErrorRecord("start", outcome.value, "", reason, 1, False))
+                        outcome=outcome, phase=phase, sentinel=sentinel)
+        r.errors.append(ErrorRecord(phase, outcome.value, "", reason, 1, False))
         self._record_cycle(r)
-        self._recover(cycle, r.code, "start", self._failure_detail(r))
+        self._recover(cycle, r.code, phase, self._failure_detail(r, lost_at=lost_at))
 
     # -- recovery protocol ------------------------------------------------------------------
     def _recover(self, cycle: int, code: str, phase: str, detail: dict[str, Any]) -> None:
         st = self.state
         st.status = Status.RECOVERING.value
         st.pending_recovery = {"cycle": cycle, "code": code, "phase": phase,
-                               "detail": {"sentinel": detail.get("sentinel")}}
+                               "detail": {"sentinel": detail.get("sentinel"), "lost_at": detail.get("lost_at")}}
         self._save()
+        self.live.update(phase="recovering", context="recovery")
         try:
             self._recover_steps(cycle, code, phase, detail)
         finally:
@@ -568,8 +778,9 @@ class Worker:
                 self._save()
             self._recovery_interrupted = False
 
-    def _hub_during_recovery(self, cycle: int) -> None:
-        """The failure turned out to be part of a hub event: re-attribute it (F5, not counted)."""
+    def _reattribute_to_hub(self, cycle: int) -> None:
+        """The failure turned out to be part of a hub event (seen late): not counted (F5).
+        Its row stays in cycles.csv; this event says that it does not count."""
         st = self.state
         if cycle in st.failure_cycles:
             st.failure_cycles.remove(cycle)
@@ -579,22 +790,31 @@ class Worker:
                       text="other drives of the hub vanished at the same time: hub event, not counted")
         st.status = Status.ACTIVE.value
         st.pending_recovery = None
-        self._wait_hub(cycle, {"where": "recovery"})
+        self._save()
 
     def _recover_steps(self, cycle: int, code: str, phase: str, detail: dict[str, Any]) -> None:
         st, policy = self.state, self.policy
-        self.live.update(phase="recovering")
         steps: dict[str, Any] = {}
-        self._record_damage((detail.get("sentinel") or {}).get("failed"))
+        self._record_damage(detail.get("sentinel"))
+        vol, how = self._find(wait=policy.reconnect_timeout_s)
+        if self.stop.is_set():
+            return self._interrupted_recovery(cycle)
+        if vol is None:
+            failed_at = _parse_time(detail.get("lost_at")) if code == "F3" else None
+            when = failed_at or self._lost_at
+            if self._hub_event(when):
+                back = self._wait_hub(cycle, when, "recovery")  # type: ignore[arg-type]
+                if back == "stopped":
+                    return self._interrupted_recovery(cycle)
+                if back == "back":
+                    if failed_at is not None:  # the disconnect itself was the hub event
+                        return self._reattribute_to_hub(cycle)
+                    self.live.update(phase="recovering", context="recovery")
+                    vol, how = self._find()  # a hub event during the protocol: the failure stands
         if limit_reached(st, policy):
             self._end_of_life(cycle, code, f"{policy.intermittent_limit} cycle failures within "
                               f"{policy.intermittent_window} cycles", steps)
             return
-        vol, how = self._find(wait=policy.reconnect_timeout_s)
-        if self.stop.is_set():
-            return self._interrupted_recovery(cycle)
-        if how == "hub":
-            return self._hub_during_recovery(cycle)
         steps["found_before_reset"] = how or "no"
         usb = self.intake.get("usb_instance")
         if policy.device_reset and self.platform.supports_reset and usb:
@@ -608,11 +828,12 @@ class Worker:
             if self.stop.is_set():
                 return self._interrupted_recovery(cycle)
             steps["found_after_reset"] = how or "no"
+        after = " and a device restart" if "reset" in steps else ""
         if vol is None:
-            if how == "hub" or self._hub_event():
-                return self._hub_during_recovery(cycle)
-            return self._attention(cycle, code, "drive not present after the failure"
-                                   + (" and a device restart" if "reset" in steps else ""), steps)
+            return self._attention(cycle, code, "drive not present after the failure" + after, steps)
+        if not vol.fs:
+            steps["file_system"] = "unreadable (RAW or no media)"
+            return self._attention(cycle, code, "no readable file system after the failure" + after, steps)
         try:
             if self.platform.is_read_only(vol.root):
                 steps["read_only"] = True
@@ -625,27 +846,32 @@ class Worker:
             steps["capacity"] = {"now": total, "intake": usable}
             return self._end_of_life(cycle, "F6", "volume capacity changed", steps)
         sres = self._sentinel(vol, "recovery")
-        steps["sentinel"] = {"ok": sres.ok, "failed": sres.failed, "detail": sres.detail[:300]}
+        steps["sentinel"] = {"ok": sres.ok, "failed": sres.failed, "failed_all": sres.failed_all,
+                             "detail": sres.detail[:300]}
         if not sres.ok:
-            self._record_damage(sres.failed)
+            self._record_damage(sres.to_json())
         check = self._fresh_check(vol)
         steps["check"] = _check_summary(check)
         if check.outcome is Outcome.ABORTED:
             return self._interrupted_recovery(cycle)
-        steps["cleanup"] = self._clear_failed_cycle(vol, cycle)
         if check.outcome is Outcome.PASS:
+            steps["cleanup"] = self._clear_failed_cycle(vol, cycle)
             st.recoveries += 1
             st.status = Status.ACTIVE.value
             self.ds.event("recovered", cycle, "D2", failure_code=code, failure_phase=phase, **steps)
             self._save()
             return
+        # The failed cycle's files stay on the drive: evidence for the post-test protocol.
         self._attention(cycle, code, "recovery check failed", steps)
 
-    def _record_damage(self, component: str | None) -> None:
-        """Damage once on record is not counted again: later checks look for new damage only."""
-        if component in ("identity", "sentinel", "boot", "upcase", "rootdir") \
-                and component not in self.state.sentinel_skip:
-            self.state.sentinel_skip.append(component)
+    def _record_damage(self, sentinel: dict[str, Any] | None) -> None:
+        """Damage once on record is not counted again: later checks look for new damage
+        only. Every component of the finding goes on record, not just the first."""
+        sentinel = sentinel or {}
+        found = list(sentinel.get("failed_all") or ([sentinel["failed"]] if sentinel.get("failed") else []))
+        new = [c for c in found if c in COMPONENTS and c not in self.state.sentinel_skip]
+        if new:
+            self.state.sentinel_skip.extend(new)
             self._save()
 
     def _fresh_check(self, vol: Volume) -> CycleResult:
@@ -663,29 +889,59 @@ class Worker:
         return result
 
     def _clear_failed_cycle(self, vol: Volume, cycle: int) -> dict[str, Any]:
+        """After a passed recovery check: remove the failed cycle's folder, so the drive goes
+        on with its full space. Every removal is retried like in a cycle; a stop leaves the
+        rest to the next cycle's setup; only a folder that still cannot be removed after the
+        retries is quarantined (left alone from then on)."""
         rel = f"{PAYLOAD_DIR}/c{cycle:06d}"
         path = os.path.join(vol.root, PAYLOAD_DIR, f"c{cycle:06d}")
-        if not os.path.exists(path):
+        if not os.path.isdir(path):
             return {"folder": rel, "result": "absent"}
+        self.live.phase("cleanup")
         dose = Dose()
+        outcome: dict[str, Any] = {"folder": rel, "result": "removed"}
         try:
             for base, dirs, files in os.walk(path, topdown=False):
                 for name in files:
-                    self.platform.remove_file(os.path.join(base, name))
+                    self._remove_with_retries(self.platform.remove_file, os.path.join(base, name))
                     dose.files_deleted += 1
+                    self.live.progress(1, 0)
                 for name in dirs:
-                    self.platform.remove_dir(os.path.join(base, name))
+                    self._remove_with_retries(self.platform.remove_dir, os.path.join(base, name))
                     dose.dirs_deleted += 1
-            self.platform.remove_dir(path)
-            outcome = {"folder": rel, "result": "removed", "files": dose.files_deleted}
-        except OSError as exc:
-            self.state.quarantined.append(rel)
-            outcome = {"folder": rel, "result": "quarantined", "error": str(exc)[:200],
+            self._remove_with_retries(self.platform.remove_dir, path)
+            dose.dirs_deleted += 1
+            outcome["files"] = dose.files_deleted
+        except _Stopped:
+            outcome = {"folder": rel, "result": "left to the next cycle's setup (stop request)",
                        "files_removed": dose.files_deleted}
-            self.ds.event("note", cycle, text=f"{rel} cannot be removed and is left alone from now on",
-                          error=str(exc)[:200])
+        except OSError as exc:
+            if not self.platform.present(vol.root):
+                outcome = {"folder": rel, "result": "left to the next cycle's setup (the drive vanished)",
+                           "error": str(exc)[:200], "files_removed": dose.files_deleted}
+            else:
+                self.state.quarantined.append(rel)
+                outcome = {"folder": rel, "result": "quarantined", "error": str(exc)[:200],
+                           "files_removed": dose.files_deleted}
+                self.ds.event("note", cycle, text=f"{rel} cannot be removed and is left alone from now on",
+                              error=str(exc)[:200])
         self.state.cum.add(dose)
         return outcome
+
+    def _remove_with_retries(self, remove, path: str) -> None:
+        retries = self.c.cycle.retries
+        for attempt in range(1, retries + 2):
+            if self.stop.is_set():
+                raise _Stopped()
+            try:
+                remove(path)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                if attempt > retries:
+                    raise
+                self._sleep(self.c.cycle.retry_backoff_s * attempt)
 
     def _attention(self, cycle: int, code: str, reason: str, steps: dict[str, Any]) -> None:
         st = self.state
@@ -736,6 +992,36 @@ class Worker:
         self.ds.event("censored", st.cycles_done, cycles_done=st.cycles_done, dose=st.cum.to_json(),
                       hours_on_test=self._hours(), fdw=round(self._fdw(), 4))
         self._save()
+
+
+def _int(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _float(value: Any) -> float | None:
+    try:
+        return float(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_time(value: Any) -> datetime | None:
+    try:
+        return parse_iso(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_phase(row: dict[str, str]) -> str:
+    """The phase of the first error recorded in a cycle row."""
+    try:
+        errors = json.loads(row.get("errors") or "[]")
+        return str(errors[0].get("phase", "")) if errors else ""
+    except (ValueError, AttributeError, IndexError, TypeError):
+        return ""
 
 
 def _comp_cell(r: dict[str, Any] | None) -> str:

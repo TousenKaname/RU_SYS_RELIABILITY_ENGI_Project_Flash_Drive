@@ -72,8 +72,11 @@ def test_worker_runs_cycles_and_censors_at_the_stop(tmp_path, sim_campaign):
     assert [r["workload"] for r in rows[:3]] == ["large", "medium", "small"]
     assert all(r["outcome"] == "pass" for r in rows)
     assert int(rows[-1]["cum_files_created"]) > 0 and float(rows[-1]["cum_fdw"]) > 0
-    types = [e["type"] for e in cs.drive("S8-01").read_events()]
-    assert types[-1] == "censored" and "interrupted" in types  # the cut-short cycle is logged, not counted
+    events = cs.drive("S8-01").read_events()
+    assert events[-1]["type"] == "censored"
+    # a cycle cut short by the stop (if the stop fell inside one) is logged, not counted
+    cut = [e for e in events if e["type"] == "interrupted"]
+    assert all(e["detail"]["at_stop_time"] for e in cut) and len(cut) <= 1
 
 
 def test_metadata_fault_is_found_and_the_drive_recovers(tmp_path, sim_campaign):

@@ -114,7 +114,12 @@ class Platform:
         return bool(os.statvfs(root).f_flag & getattr(os, "ST_RDONLY", 1))
 
     def present(self, root: str) -> bool:
+        """The volume can be used for file I/O."""
         return os.path.isdir(root)
+
+    def attached(self, root: str) -> bool:
+        """The volume's device is still on the bus, even if its file system cannot be read."""
+        return self.present(root)
 
     def storage_info(self, root: str) -> StorageInfo | None:
         return None

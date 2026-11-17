@@ -92,6 +92,7 @@ const PHASE = {
   write: ["var(--st-write)", "WRITE"], verify: ["var(--st-verify)", "VERIFY"], delete: ["var(--st-delete)", "DELETE"],
   setup: ["var(--st-setup)", "SETUP"], check: ["var(--st-setup)", "CHECK"], sentinel: ["var(--st-setup)", "CHECKING"],
   locating: ["var(--st-setup)", "LOCATING"], recovering: ["var(--st-recover)", "RECOVERY"], "paused (hub)": ["var(--st-paused)", "HUB EVENT"],
+  cleanup: ["var(--st-recover)", "CLEANUP"],
 };
 function visual(d) {
   if (!d.enrolled) return { cls: "empty", color: "var(--line2)", label: "NOT ENROLLED", pulse: false };
@@ -522,11 +523,19 @@ function renderSetup() {
   const nOk = checks.filter((x) => x.status === "ok").length;
   const step = (n, cls, title, body) => `<div class="step ${cls}"><div class="num">${n}</div><div class="card"><h3>${title}</h3>${body}</div></div>`;
   const nextGroup = nextId && S.drives[nextId] ? S.campaign.groups[S.drives[nextId].group] : null;
-  const fits = (x) => !nextGroup || !x.total || Math.abs(x.total / (nextGroup.capacity_gb * 1e9) - 1) <= 0.15;
+  const fits = (x) => !nextGroup || (x.total > 0 && Math.abs(x.total / (nextGroup.capacity_gb * 1e9) - 1) <= 0.15);
+  const enrolling = (S.jobs || []).some((j) => j.kind === "enroll" && (j.status === "queued" || j.status === "running"));
+  const enrollCell = (x, i) => {
+    if (!nextId) return "";
+    if (!x.fs) return `<span class="small muted">no readable file system: format it by hand (exFAT) first</span>`;
+    if (!fits(x)) return `<span class="small muted">not an ${esc(S.drives[nextId].group)} stick</span>`;
+    return `<button class="btn small primary" data-enroll="${i}" ${enrolling ? "disabled title=\"an enrollment is running\"" : ""}>Enroll as ${esc(nextId)}</button>`;
+  };
   const candRows = cands.length ? `<table class="tbl"><tr><th>Letter</th><th>Label</th><th>File system</th><th>Size</th><th>USB serial</th><th>PC port / chain</th><th>Earlier ID</th><th></th></tr>` +
     cands.map((x, i) => `<tr><td><b>${esc(x.letter ? x.letter + ":" : "—")}</b></td><td>${esc(x.label)}</td><td>${esc(x.fs || "RAW")}</td><td>${fmtGB(x.total)}</td><td class="mono">${esc(x.serial)}</td>
       <td class="small">${esc((x.hub_key || "").split("#").slice(-1)[0] || "—")} ${esc(x.port_chain || "")}</td><td>${esc(x.old_identity || "")}</td>
-      <td>${!nextId ? "" : fits(x) ? `<button class="btn small primary" data-enroll="${i}">Enroll as ${esc(nextId)}</button>` : `<span class="small muted">not a ${esc(S.drives[nextId].group)} stick</span>`}</td></tr>`).join("") + `</table>` +
+      <td>${enrollCell(x, i)}</td></tr>`).join("") + `</table>` +
+      (enrolling ? `<div class="small muted" style="margin-top:6px">Formatting… wait until the ✓ appears before you enroll the next stick.</div>` : "") +
       (cands.length > 1 ? `<div class="small" style="color:var(--warn);margin-top:6px">Several new sticks are plugged in: make sure you pick the one labelled ${esc(nextId || "")} (plug them in one at a time to be safe).</div>` : "") :
     `<div class="list-msg">No new USB drive found. Plug in <b>${esc(nextId || "the next drive")}</b>${nextSlot ? ` (hub ${esc(nextSlot.hub)}, port ${nextSlot.port})` : ""} and wait a few seconds.</div>`;
   $("#setup").innerHTML = `<div class="steps">
@@ -560,12 +569,13 @@ function renderSetup() {
   $("#btn-undo").onclick = async () => { if (await confirmBox("Undo host changes", "Put back every PC setting the rig changed (sleep, USB suspend, Windows Update pause, AutoPlay, Defender exclusion, auto-resume)?", "Undo")) runJob("undo", {}, "undo"); };
   $$("[data-selftest]").forEach((b) => (b.onclick = () => runJob("selftest", { drive: b.dataset.selftest }, `self-test ${b.dataset.selftest}`)));
   $$("[data-enroll]").forEach((b) => (b.onclick = async () => {
+    if ((S.jobs || []).some((j) => j.kind === "enroll" && (j.status === "queued" || j.status === "running"))) { toast("an enrollment is still running", "err"); return; }
     const x = cands[+b.dataset.enroll];
     const ok = await confirmBox(`Enroll ${nextId}`, `<p>Format <b>${esc(x.letter ? x.letter + ":" : x.root)}</b> (${fmtGB(x.total)}, ${esc(x.fs || "RAW")}, label “${esc(x.label)}”, USB serial <code>${esc(x.serial)}</code>) as <b>${esc(nextId)}</b>?</p><p style="color:var(--bad)"><b>Everything on this stick will be erased.</b></p><p class="muted">Check that it is the stick labelled ${esc(nextId)}.</p>`, "Format and enroll", true);
-    if (ok) runJob("enroll", { drive: nextId, guid: x.guid, root: x.root, serial: x.serial }, `enroll ${nextId}`);
+    if (ok) { $$("[data-enroll]").forEach((e) => (e.disabled = true)); runJob("enroll", { drive: nextId, guid: x.guid, root: x.root, serial: x.serial }, `enroll ${nextId}`); }
   }));
   if (S.sim) $("#btn-sim-enroll").onclick = () => runJob("sim_enroll_all", {}, "enroll all");
-  $("#btn-start").onclick = startTest;
+  $("#btn-start").onclick = () => startTest(false);  // never pass the click event as `force`
 }
 function bindFixButtons() {
   $$("[data-fix]").forEach((b) => (b.onclick = async () => {

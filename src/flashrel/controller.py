@@ -30,13 +30,13 @@ from typing import Any
 from flashrel import __version__, analysis, export, hostops, intake, posttest
 from flashrel.config import Campaign, for_simulation, load_campaign
 from flashrel.cycle import ErrorRecord
-from flashrel.failure import FINAL, DriveState, Status, life_record
+from flashrel.failure import FINAL, Dose, DriveState, Status, life_record
 from flashrel.platform import Platform
 from flashrel.sentinel import locate, read_identity
-from flashrel.store import (HUB_FIELDS, TEMPERATURE_FIELDS, CampaignStore, FileLock, append_csv,
-                            atomic_write_json, read_json)
+from flashrel.store import (HUB_FIELDS, TEMPERATURE_FIELDS, CampaignStore, FileLock, StoreError,
+                            append_csv, atomic_write_json, read_json)
 from flashrel.timeutil import iso, parse_iso, utc_now
-from flashrel.worker import IO_PHASES
+from flashrel.worker import UNWATCHED_PHASES
 
 TICK_S = 1.0
 PRESENCE_S = 5.0
@@ -56,6 +56,10 @@ class AlreadyRunning(RuntimeError):
         self.url = url
 
 
+class JobRefused(RuntimeError):
+    """An operator action that cannot run now (the dashboard shows the reason)."""
+
+
 @dataclass
 class Proc:
     drive: str
@@ -67,6 +71,7 @@ class Proc:
     last_beat: int = -1
     beat_changed: float = 0.0
     hang: dict[str, Any] | None = None
+    scan_hangs: int = 0  # hangs in a row inside a scan of every volume
     giving_up: bool = False
     adopted: int | None = None  # pid of a worker left running by an earlier controller
 
@@ -106,8 +111,10 @@ class Controller:
         if not self.lock.acquire():
             info = read_json(self.cstore.controller_json, {}) or {}
             raise AlreadyRunning(info.get("url", "http://127.0.0.1:8585/"))
-        frozen = read_json(self.cstore.campaign_json)
-        self.run = self.cstore.run_state() or {"phase": "setup"}
+        frozen = read_json(self.cstore.campaign_json, strict=True)
+        # strict: a run.json that is merely held must never be taken for "no test yet"
+        # (Start would then overwrite the running test's design and state).
+        self.run = self.cstore.run_state(strict=True) or {"phase": "setup"}
         if frozen and self.run.get("phase") not in (None, "setup"):
             self.campaign = Campaign.from_json(frozen)  # a started test keeps its frozen design
         if sim_root:
@@ -123,6 +130,8 @@ class Controller:
         self.lock_state = threading.RLock()
         self.snapshot: dict[str, Any] = {}
         self.presence: dict[str, Any] = {"time": "", "drives": {}}
+        self._missing_since: dict[str, str] = {}           # drive -> first scan that missed it
+        self._last_missing: dict[str, dict[str, str]] = {}  # drive -> its last completed gap
         self.inventory = read_json(self.cstore.host_dir / "inventory.json", {}) or {}
         self.checks: list[dict[str, Any]] = read_json(self.cstore.host_dir / "checks.json", []) or []
         self.events: dict[str, collections.deque] = {}
@@ -193,7 +202,7 @@ class Controller:
                 atomic_write_json(self.cstore.controller_json, {
                     "time": iso(), "pid": os.getpid(), "url": self.url, "phase": self.run.get("phase"),
                     "software": __version__, "loop_age_s": round(time.monotonic() - self._last_mono, 1)})
-            except OSError as exc:
+            except Exception as exc:  # never let the heartbeat thread die
                 self._log(f"heartbeat write failed: {exc}")
             self.shutdown_requested.wait(5.0)
 
@@ -202,7 +211,10 @@ class Controller:
         warned = False
         while not self.shutdown_requested.is_set():
             t0 = time.monotonic()
-            self._update_presence()
+            try:
+                self._update_presence()
+            except Exception:  # a scan that fails must not end the scans
+                self._log(f"presence scan failed:\n{traceback.format_exc(limit=4)}")
             took = time.monotonic() - t0
             if took > 30 and not warned:
                 warned = True
@@ -259,6 +271,9 @@ class Controller:
     # presence
     # ======================================================================================
     def _update_presence(self) -> None:
+        """Which drive is where. For the workers' hub-event check it also keeps, per drive,
+        the scan that first missed it (``missing_since``) and its last completed gap."""
+        scanned = iso()
         try:
             vols = self.platform.list_volumes()
         except Exception as exc:
@@ -282,11 +297,17 @@ class Controller:
                 vol, how = locate(self.platform, unit, intake_rec, volumes=[v for v in vols if not v.fs or v not in by_token.values()])
             state = ds.load_state() or {}
             slot = self.campaign.slot_of(unit)
+            if vol is None:
+                self._missing_since.setdefault(unit, scanned)
+            elif unit in self._missing_since:
+                self._last_missing[unit] = {"from": self._missing_since.pop(unit), "to": scanned}
             drives[unit] = {"present": vol is not None, "how": how, "root": vol.root if vol else "",
                             "letter": vol.letter if vol else "", "hub": slot.hub if slot else "",
                             "port": slot.port if slot else 0,
-                            "expected": bool(running and slot and state.get("status") not in FINAL)}
-        self.presence = {"time": iso(), "drives": drives}
+                            "expected": bool(running and slot and state.get("status") not in FINAL),
+                            "missing_since": self._missing_since.get(unit, ""),
+                            "last_missing": self._last_missing.get(unit)}
+        self.presence = {"time": iso(), "scanned": scanned, "drives": drives}
         atomic_write_json(self.cstore.presence_json, self.presence)
 
     # ======================================================================================
@@ -363,16 +384,25 @@ class Controller:
                         proc.next_start = now + 1800
                 elif proc.last_exit == 0 and status not in FINAL:
                     proc.next_start = now + 10
+            if proc.hang:  # seen before any stop: recorded whatever the campaign phase is now
+                if now >= proc.hang.get("retry_at", 0.0):
+                    self._record_hang(proc)
+                continue
             if phase != "running" or status in FINAL or not state:
                 continue
-            if proc.hang and not proc.hang.get("recorded"):
-                self._record_hang(proc)
-                continue
             if now >= proc.next_start and proc.next_start > 0:
-                self._spawn(proc)
+                with self.lock_state:  # Pause / End now may have come in since `phase` was read
+                    if self.run.get("phase") != "running":
+                        continue
+                    self._spawn(proc)
                 alive += 1
         if phase == "running" and self.run.get("stop_at") and utc_now() >= parse_iso(self.run["stop_at"]):
             self._set_phase("stopping", reason="stop time reached")
+        if phase == "pausing" and alive:  # every worker still running gets the stop request
+            for unit, proc in self.procs.items():
+                running = (proc.popen is not None and proc.popen.poll() is None) or proc.adopted
+                if running and not self.cstore.drive(unit).control().get("stop"):
+                    self.cstore.drive(unit).request(stop=True, reason="paused")
         if phase in ("stopping", "pausing") and alive == 0:
             if phase == "pausing":
                 self._set_phase("paused")
@@ -386,7 +416,12 @@ class Controller:
         started = parse_iso(self.run["started_at"]) if self.run.get("started_at") else utc_now()
         for unit in self.campaign.test_drives():
             ds = self.cstore.drive(unit)
-            raw = ds.load_state()
+            try:
+                raw = ds.load_state(strict=True)
+            except StoreError as exc:
+                self.cstore.host_event("censor_failed", drive=unit, error=str(exc)[:300],
+                                       text="state file unreadable at the stop: censor this drive by hand")
+                continue
             if not raw or raw.get("status") in FINAL:
                 continue
             lock = FileLock(ds.lock_path)
@@ -433,6 +468,8 @@ class Controller:
         beat = int(live.get("beat", -1))
         if beat != proc.last_beat:
             proc.last_beat, proc.beat_changed = beat, now
+            if proc.scan_hangs and now - proc.started > 2 * self.campaign.failure.hang_timeout_s:
+                proc.scan_hangs = 0  # it has been running well since: the next scan hang is a first
             return
         if proc.hang is not None:
             if now - proc.hang["since"] > 60 and not proc.hang.get("terminated"):
@@ -441,53 +478,101 @@ class Controller:
                 self.cstore.host_event("worker_terminated", drive=proc.drive, reason="hang")
             return
         idle = now - proc.beat_changed
-        if live.get("phase") in IO_PHASES and idle > self.campaign.failure.hang_timeout_s:
+        if live.get("phase") not in UNWATCHED_PHASES and idle > self.campaign.failure.hang_timeout_s:
+            # What the worker was doing when it stopped moving decides what is booked.
             proc.hang = {"since": now, "idle_s": round(idle), "phase": live.get("phase"),
-                         "cycle": live.get("cycle")}
+                         "cycle": live.get("cycle"), "context": live.get("context") or "",
+                         "scan": bool(live.get("scan"))}
             self.cstore.drive(proc.drive).request(stop=True, reason="hang watchdog")
-            self.cstore.host_event("hang", drive=proc.drive, idle_s=round(idle), phase=live.get("phase"))
+            self.cstore.host_event("hang", drive=proc.drive, idle_s=round(idle), phase=live.get("phase"),
+                                   context=live.get("context"))
 
     def _record_hang(self, proc: Proc) -> None:
-        """F3 hang: the worker made no progress for 10 min and was stopped. Recorded as a cycle
-        failure; the next worker runs the recovery protocol (a second hang ends in attention)."""
+        """F3 hang: the worker made no progress for 10 min and was stopped. What is booked
+        depends on where it hung:
+
+        * in a cycle, or at the start of one: a failed cycle (with the wear of the hung
+          cycle and the hours on test); the next worker runs the recovery protocol;
+        * in a cycle the worker had already booked as failed before it stopped: nothing
+          new (the recovery protocol of that failure goes on);
+        * in the recovery protocol: automatic recovery failed -> attention, for the failed
+          cycle (no new cycle is booked).
+        """
         ds = self.cstore.drive(proc.drive)
         lock = FileLock(ds.lock_path)
         if not lock.acquire():
             return  # the process is still dying
+        hang = proc.hang or {}
         try:
-            raw = ds.load_state() or {"drive_id": proc.drive}
-            state = DriveState.from_json(raw)
-            cycle = int((state.in_progress or {}).get("cycle") or state.cycles_done + 1)
-            reason = f"no I/O progress for {proc.hang['idle_s'] // 60} min in the {proc.hang['phase']} phase"
-            again = state.pending_recovery is not None
-            state.in_progress = None
-            if cycle > state.cycles_done:
-                state.cycles_done = cycle
-            state.failure_cycles.append(cycle)
-            state.last_outcome = "hang"
-            if state.first_failure is None:
-                state.first_failure = life_record(cycle, "F3", iso(), state.cum, None, phase=proc.hang["phase"],
-                                                  outcome="hang")
-            group = self.campaign.group_of(proc.drive).id
-            slot = self.campaign.slot_of(proc.drive)
-            ds.append_cycle({"campaign": self.campaign.name, "drive": proc.drive, "group": group,
-                             "hub": slot.hub if slot else "", "port": slot.port if slot else "",
-                             "cycle": cycle, "workload": self.campaign.workload_for_cycle(cycle).name,
-                             "started_at": iso(), "ended_at": iso(), "outcome": "hang", "code": "F3",
-                             "errors": [ErrorRecord(proc.hang["phase"], "hang", "", reason, 1, False).__dict__],
-                             "software": __version__})
-            ds.event("cycle_failure", cycle, "F3", outcome="hang", reason=reason, dose=state.cum.to_json())
-            if again:
-                state.status = Status.ATTENTION.value
-                state.pending_recovery = None
-                state.end_of_life = life_record(cycle, "F3", iso(), state.cum, None, reason="hung again "
-                                                "during the recovery protocol", confirmed=False)
-                ds.event("attention", cycle, "F3", reason="hung again during the recovery protocol")
+            try:
+                raw = ds.load_state(strict=True)
+            except StoreError as exc:
+                self._log(f"hang of {proc.drive} not recorded yet: {exc}")
+                hang["retry_at"] = time.monotonic() + 30.0
+                return
+            state = DriveState.from_json(raw or {"drive_id": proc.drive})
+            live = ds.load_live() or {}
+            context = hang.get("context") or ""
+            reason = f"no I/O progress for {int(hang.get('idle_s', 0)) // 60} min in the {hang.get('phase')} phase"
+            hours = round(self._hours_now(), 4)
+            if state.in_progress:  # the worker died in the cycle: its wear up to the last live status
+                state.cum.add(Dose.from_json(live.get("cycle_dose")))
+            pending = state.pending_recovery
+            cycle = int(hang.get("cycle") or (state.in_progress or {}).get("cycle") or state.cycles_done + 1)
+            proc.scan_hangs = proc.scan_hangs + 1 if hang.get("scan") else 0
+            if proc.scan_hangs == 1:
+                # Held up while looking at every volume: another stick that no longer answers
+                # can do that. Restart the worker; a second time in a row counts as its own.
+                self.cstore.host_event("scan_hang", drive=proc.drive, reason=reason,
+                                       text="worker stuck in a scan of all volumes: restarted, not booked")
+                if state.in_progress:  # its wear is in cum now: the next worker must not add it again
+                    ds.event("interrupted", cycle, reason="worker restarted after a hang in a volume scan",
+                             text="cycle not completed; not counted")
+                    state.in_progress = None
+            elif context == "recovery":
+                if pending:
+                    cycle = int(pending.get("cycle") or state.cycles_done)
+                    code = pending.get("code") or "F3"
+                    state.status = Status.ATTENTION.value
+                    state.pending_recovery = None
+                    state.end_of_life = life_record(cycle, code, iso(), state.cum, hours, confirmed=False,
+                                                    reason=f"hung during the recovery protocol ({reason})")
+                    ds.event("attention", cycle, code, reason="hung during the recovery protocol",
+                             detail=reason, hours_on_test=hours)
+                else:
+                    ds.event("hang", state.cycles_done, "F3", reason=reason, context=context,
+                             text="hung outside a cycle and without a recovery protocol to finish")
+            elif state.cycles_done >= cycle:
+                ds.event("hang", cycle, "F3", reason=reason, context=context,
+                         text="hung after this cycle's failure was booked; its recovery protocol goes on")
             else:
+                inp = state.in_progress or {}
+                state.in_progress = None
+                state.cycles_done = cycle
+                state.failure_cycles.append(cycle)
+                state.last_outcome = "hang"
+                if state.first_failure is None:
+                    state.first_failure = life_record(cycle, "F3", iso(), state.cum, hours,
+                                                      phase=hang.get("phase"), outcome="hang")
+                group = self.campaign.group_of(proc.drive).id
+                slot = self.campaign.slot_of(proc.drive)
+                usable = int((ds.load_intake() or {}).get("usable_bytes") or 0)
+                ds.append_cycle({
+                    "campaign": self.campaign.name, "drive": proc.drive, "group": group,
+                    "hub": slot.hub if slot else "", "port": slot.port if slot else "", "cycle": cycle,
+                    "workload": inp.get("workload") or self.campaign.workload_for_cycle(cycle).name,
+                    "started_at": inp.get("started_at") or iso(), "ended_at": iso(), "outcome": "hang",
+                    "code": "F3",
+                    "errors": [ErrorRecord(str(hang.get("phase")), "hang", "", reason, 1, False).__dict__],
+                    "cum_bytes_written": state.cum.bytes_written, "cum_bytes_read": state.cum.bytes_read,
+                    "cum_files_created": state.cum.files_created, "cum_files_deleted": state.cum.files_deleted,
+                    "cum_fdw": round(state.cum.bytes_written / usable, 4) if usable else "",
+                    "hours_on_test": hours, "software": __version__})
+                ds.event("cycle_failure", cycle, "F3", outcome="hang", reason=reason, phase=hang.get("phase"),
+                         context=context, dose=state.cum.to_json(), hours_on_test=hours)
                 state.status = Status.RECOVERING.value
                 state.pending_recovery = {"cycle": cycle, "code": "F3", "phase": "hang", "detail": {}}
             ds.save_state(state.to_json())
-            proc.hang["recorded"] = True
             proc.hang = None
             proc.next_start = time.monotonic() + 15
         finally:
@@ -647,6 +732,10 @@ class Controller:
     def submit(self, kind: str, args: dict[str, Any]) -> dict[str, Any]:
         job = Job(id=secrets.token_hex(4), kind=kind, args=args)
         with self.lock_state:
+            if kind == "enroll" and any(j.kind == "enroll" and j.status in ("queued", "running") for j in self.jobs):
+                # One stick at a time: a second click while a format runs would format
+                # another stick under the same drive ID.
+                raise JobRefused("an enrollment is still running: wait for it to finish")
             self.jobs.append(job)
             self.jobs = self.jobs[-60:]
         self.job_queue.put(job)

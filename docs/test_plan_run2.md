@@ -1,7 +1,7 @@
 # Test plan, run 2: 20 USB flash drives, two 10-port hubs, 120 hours
 
 ISE 16:540:585 Systems Reliability Engineering I, Project 4, Group 4 (Guoan Wang,
-Shangqing Wei, Mengtong Ai). Campaign `fall2026b`, software FlashRel Rig 2.0.
+Shangqing Wei, Mengtong Ai). Campaign `fall2026b`, software FlashRel Rig 2.1.
 
 ## 1. Why a second run
 
@@ -98,25 +98,37 @@ erased, truncated). Errors are retried twice (5 s, 10 s).
    phase, at every phase boundary and at the start of every cycle: identity and
    sentinel files read around the cache; exFAT boot-region checksum, up-case table
    checksum and root-directory entry sets read raw. A finding must persist over three
-   reads 5 s apart. A confirmed finding ends the cycle at once as F1 (data at rest) or
-   F6 (file-system records), so a failure is time-stamped within ten minutes.
+   reads 5 s apart. A confirmed finding ends the cycle at once as F1 (data at rest), F6
+   (damaged file-system records) or F2 (a record that cannot be read), so a failure is
+   time-stamped within ten minutes. Every record a finding covers goes on record at once.
+   A confirmed finding is the cycle's outcome even if a stop, a disconnect or an I/O
+   error ends the cycle afterwards.
 2. **Dose counters.** Bytes written and read, files created and deleted, directories and
    flushes are counted for every drive, including the partial cycles cut short by a stop
    or a crash; every failure carries the exact counts at its detection. Life is recorded
    in four time scales: cycles, hours on test, full-drive writes (FDW), file operations.
 3. **Recovery protocol** after a cycle failure: wait for the drive (2 min) → restart the
    USB device in software (`pnputil /restart-device`, the equivalent of re-plugging it) →
-   read-only? capacity changed? (end of life) → sentinel check → write, verify and delete
-   64 MiB of fresh data in a separate folder, *without* first deleting the failed cycle's
-   folder → try to delete that folder (if it cannot be deleted it is quarantined). A drive
-   that passes keeps cycling (intermittent failure, D2); one that does not stops in the
-   attention state until the post-test protocol. Damage already on record is not counted again.
+   no readable file system (RAW)? (attention) → read-only? capacity changed? (end of life)
+   → sentinel check → write, verify and delete 64 MiB of fresh data in a separate folder,
+   *without* first deleting the failed cycle's folder. A drive that passes keeps cycling
+   (intermittent failure, D2) and its failed folder is deleted (retried like any delete;
+   quarantined only if it still cannot be deleted); one that does not stops in the
+   attention state until the post-test protocol, with the failed folder left on it as
+   evidence. Damage already on record is not counted again.
 4. **Stop time** checked between chunks and files in every phase, including delete.
-5. **Hub events.** When three or more drives of one hub vanish at once, the event is a
-   hub fault (F5): not counted against the drives, which wait for the hub to return.
-6. **Hang watchdog** (no I/O progress for 10 min → F3, then the recovery protocol; a
-   second hang → attention), worker restart after a crash, resume after a power cut or
-   restart (the cycle in progress is logged as interrupted with its wear, not counted).
+5. **Hub events.** When three or more drives of one hub vanish within 30 s of each other
+   (each worker records the moment its drive vanished; the controller's presence scan
+   adds what it saw; the count is taken after a 12 s settle time), the event is a hub
+   fault (F5): not counted against the drives, which wait for the hub to return. A drive
+   that is not back 2 min after the hub's other drives are back has failed on its own (F3).
+6. **Hang watchdog** in every phase (no progress for 10 min → F3 with the wear and hours
+   of the hung cycle, then the recovery protocol; a hang in the recovery protocol →
+   attention, with no new cycle booked; a first hang inside a scan of every volume, which
+   another stick can hold up, only restarts the worker), worker restart after a crash,
+   resume after a power cut or restart (the cycle in progress is logged as interrupted
+   with its wear, not counted; a failed cycle whose state was not saved is put back from
+   its row in cycles.csv).
 7. **Post-test data retention**: the files of the cut-short or failed cycle that are still
    on a drive are re-read and compared after the test.
 
@@ -124,12 +136,12 @@ erased, truncated). Errors are retried twice (5 s, 10 s).
 
 | Code | Failure mode | Code | Degradation indicator |
 | --- | --- | --- | --- |
-| F1 | data corruption: read-back differs, files missing, or a file at rest damaged | D1 | write throughput < 50 % of the drive's baseline for 3 consecutive cycles of a workload |
+| F1 | data corruption: read-back differs, files missing (also a file gone between its read-back and its delete), or a file at rest damaged | D1 | write throughput < 50 % of the drive's baseline for 3 consecutive cycles of a workload |
 | F2 | unrecoverable I/O error | D2 | intermittent failure: a cycle failure after which the drive passes the recovery check |
 | F3 | disconnect, not found, or hang (10 min without progress) | D3 | transient error cleared by a retry or a second read |
 | F4 | read-only lock | | |
 | F5 | port, hub or host fault (not counted) | | |
-| F6 | file-system fault: records damaged, space not returned, capacity change | | |
+| F6 | file-system fault: records damaged, the file system no longer mounts (RAW, stick still on the bus), space not returned, capacity change | | |
 
 * **Time to failure T** (primary): the cycle of the first cycle failure (F1–F4, F6),
   with the dose and hours at its detection.
