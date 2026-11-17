@@ -170,19 +170,27 @@ class Campaign:
 
     @classmethod
     def from_json(cls, d: dict[str, Any]) -> Campaign:
+        """The frozen design of a started test. Keys this version does not know (an option
+        removed since) are ignored, and new options take their defaults, so a test started
+        with an earlier 2.x package can be continued."""
         return cls(
             name=d["name"], title=d["title"], seed=int(d["seed"]),
             duration_h=float(d["duration_h"]), stagger_s=float(d["stagger_s"]),
-            cycle=CycleSpec(**{**d["cycle"], "rotation": tuple(d["cycle"]["rotation"])}),
-            workloads={k: Workload(**v) for k, v in d["workloads"].items()},
-            sentinel=SentinelSpec(**d["sentinel"]), failure=FailurePolicy(**d["failure"]),
-            temperature=TemperatureSpec(**d["temperature"]), hubs=tuple(d["hubs"]),
+            cycle=_spec(CycleSpec, {**d["cycle"], "rotation": tuple(d["cycle"]["rotation"])}),
+            workloads={k: _spec(Workload, v) for k, v in d["workloads"].items()},
+            sentinel=_spec(SentinelSpec, d["sentinel"]), failure=_spec(FailurePolicy, d["failure"]),
+            temperature=_spec(TemperatureSpec, d.get("temperature") or {}), hubs=tuple(d["hubs"]),
             ports_per_hub=int(d["ports_per_hub"]), hub_model=d.get("hub_model", ""),
             groups={k: Group(**{**v, "units": tuple(v["units"])}) for k, v in d["groups"].items()},
             prior={k: Prior(**v) for k, v in d.get("prior", {}).items()},
             slots=tuple(Slot(**s) for s in d["slots"]), spares=tuple(d.get("spares", ())),
             sim=dict(d.get("sim") or {}),
         )
+
+
+def _spec(cls, values: dict[str, Any]):
+    known = {f.name for f in dataclasses.fields(cls)}
+    return cls(**{k: v for k, v in values.items() if k in known})
 
 
 # -- loading ----------------------------------------------------------------------------------

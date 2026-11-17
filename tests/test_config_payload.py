@@ -97,3 +97,14 @@ def test_sentinel_content_is_reproducible():
     a = sentinel_bytes("A8-06", "abc", 1 << 20)
     assert a == sentinel_bytes("A8-06", "abc", 1 << 20) and len(a) == 1 << 20
     assert a != sentinel_bytes("A8-06", "abd", 1 << 20)
+
+
+def test_a_design_frozen_by_an_earlier_version_still_loads(campaign):
+    """2.0.0 froze temperature.serial_port, removed in 2.1.0; 2.1.0 added hub_window_s."""
+    from flashrel.config import Campaign
+
+    frozen = campaign.to_json()
+    frozen["temperature"]["serial_port"] = ""
+    del frozen["failure"]["hub_window_s"]
+    again = Campaign.from_json(frozen)
+    assert again.failure.hub_window_s == 30.0 and again.temperature.acpi == campaign.temperature.acpi
