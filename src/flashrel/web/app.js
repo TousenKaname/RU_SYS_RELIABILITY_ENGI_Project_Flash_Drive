@@ -107,8 +107,34 @@ function visual(d) {
   const ph = PHASE[d.phase] || ["var(--st-setup)", String(d.phase || "").toUpperCase()];
   return { cls: d.present === false ? "missing" : "", color: ph[0], label: ph[1], pulse: true };
 }
-function stickSvg(color) {
-  return `<svg class="stick" viewBox="0 0 18 30"><rect x="5.5" y="1" width="7" height="6" rx="1" fill="none" stroke="${color}" stroke-width="1.4"/><rect x="2" y="7" width="14" height="22" rx="4" fill="none" stroke="${color}" stroke-width="1.6"/><circle cx="9" cy="18" r="2" fill="${color}"/></svg>`;
+/* A USB stick plugged into its hub port: ABLAZE sticks are brushed metal, SanDisk ones black
+   plastic; the band carries the group colour and the LED the current phase. */
+function stickArt(d, v) {
+  if (!d || !d.enrolled) return `<div class="stickart empty" title="empty port"></div>`;
+  const final = ["failed", "attention", "censored"].includes(d.status);
+  const missing = d.present === false && !final;
+  let led = v.color, on = v.pulse && d.worker.running;
+  if (d.status === "failed") { led = "var(--st-failed)"; on = false; }
+  else if (d.status === "attention") { led = "var(--st-attn)"; on = true; }
+  else if (d.status === "censored") { led = "#334155"; on = false; }
+  else if (!d.worker.running) { led = "#64748b"; on = false; }
+  const gc = GCOL(d.group);
+  const body = d.group === "S8"
+    ? `<rect x="7" y="2" width="30" height="58" rx="5" fill="url(#fr-plastic)" stroke="#05070a"/><rect x="7.5" y="2.5" width="29" height="6" rx="3" fill="#c62828"/>`
+    : `<rect x="7" y="2" width="30" height="58" rx="7" fill="url(#fr-metal)" stroke="#6b7484"/><circle cx="22" cy="10" r="3.6" fill="#0d1322" stroke="#5c6576"/>`;
+  const cls = `stickart${missing ? " missing" : ""}${["failed", "censored"].includes(d.status) ? " dim" : ""}`;
+  return `<svg class="${cls}" viewBox="0 0 44 92" data-drive="${esc(d.id)}" role="img" aria-label="${esc(d.id)} stick">
+    ${body}
+    <rect x="7" y="38" width="30" height="13" fill="${gc}" opacity=".95"/>
+    <text x="22" y="47.6" text-anchor="middle" font-size="8.2" font-weight="800" fill="${d.group === "S8" ? "#1c1404" : "#fff"}">${esc(d.group)}</text>
+    <circle cx="22" cy="25" r="7" style="fill:${led}" opacity="${on ? 0.28 : 0}" class="${on ? "sled on" : ""}"/>
+    <circle cx="22" cy="25" r="3.6" style="fill:${led}" class="sled${on ? " on" : ""}"/>
+    <rect x="12" y="60" width="20" height="31" rx="1.5" fill="url(#fr-plug)" stroke="#7c8594"/>
+    <rect x="15.5" y="66" width="4" height="4" rx=".5" fill="#3a4252"/><rect x="24.5" y="66" width="4" height="4" rx=".5" fill="#3a4252"/>
+    ${d.status === "failed" ? `<path d="M13 16 L31 34 M31 16 L13 34" stroke="#ef4444" stroke-width="3.4" stroke-linecap="round"/>` : ""}
+    ${d.status === "attention" ? `<circle cx="35" cy="6" r="6" fill="#ec4899"/><text x="35" y="9.6" text-anchor="middle" font-size="9.5" font-weight="900" fill="#fff">!</text>` : ""}
+    ${missing ? `<rect x="4.5" y="0.5" width="35" height="62" rx="8" fill="none" stroke="#f97316" stroke-dasharray="4 3" stroke-width="1.6"/>` : ""}
+  </svg>`;
 }
 
 /* ---------- header and KPIs -------------------------------------------------------------- */
@@ -191,7 +217,28 @@ function portCard(slot) {
   if (d.present === false && d.enrolled && !["failed", "attention", "censored"].includes(d.status)) extra.push(`<span class="bad">missing</span>`);
   return `<div class="port ${v.cls}" style="--gc:${gc}" data-drive="${esc(d.id)}" title="${esc(d.id)} · click for details">
     <div class="row1"><span class="led ${v.pulse ? "pulse" : ""}" style="background:${v.color};--lc:${v.color}"></span>P${slot.port}<span class="chip">${esc(g)}</span></div>
-    <div class="id">${esc(d.id)}</div>${body}<div class="health">${sent}${extra.join("")}</div>${stickSvg(gc)}</div>`;
+    <div class="id">${esc(d.id)}</div>${body}<div class="health">${sent}${extra.join("")}</div></div>`;
+}
+
+/* The hub as a device: a dark metal bar with ten USB 3.0 ports, a switch and a blue LED per
+   port (as on the Sabrent HB-BU10), the cable to the PC on the left and the 12 V jack on the
+   right; the sticks stand in their ports and each drive's card sits right above its stick. */
+function hubBody(h, slots, keyTxt) {
+  const cable = `<svg viewBox="0 0 46 70" aria-hidden="true"><title>cable to the PC</title>
+    <path d="M40 30 C 14 30, 18 70, -12 78" fill="none" stroke="#0d1016" stroke-width="8" stroke-linecap="round"/>
+    <path d="M40 30 C 14 30, 18 70, -12 78" fill="none" stroke="#5b6475" stroke-width="2.2" stroke-linecap="round" opacity=".75"/>
+    <rect x="30" y="22" width="16" height="16" rx="4" fill="#12161e" stroke="#5b6475"/>
+    <text x="8" y="16" font-size="8.5" font-weight="700" fill="#8b94a4">PC</text></svg>`;
+  const jack = `<svg viewBox="0 0 46 70" aria-hidden="true"><circle cx="20" cy="27" r="9" fill="#0b0e13" stroke="#6b7484" stroke-width="1.5"/>
+    <circle cx="20" cy="27" r="3" fill="#c3cad5"/><text x="20" y="50" text-anchor="middle" font-size="8.5" font-weight="700" fill="#8b94a4">12 V</text></svg>`;
+  const bays = slots.map((s) => {
+    const d = S.drives[s.drive];
+    return `<div class="bay${d && d.enrolled ? " occ" : ""}"><div class="slot"><i></i></div>
+      <div class="ctrl"><span class="sw on" title="port switch: on"></span><span class="pled on" title="port power"></span></div>
+      <div class="num">${s.port}</div></div>`;
+  }).join("");
+  return `<div class="hubbody"><div class="endcap">${cable}</div>${bays}<div class="endcap">${jack}</div>
+    <div class="hubmark">SABRENT &nbsp;·&nbsp; HB-BU10 &nbsp;·&nbsp; 10-PORT USB 3.0 HUB &nbsp;·&nbsp; ${esc(h)}</div></div>`;
 }
 
 function renderHubs() {
@@ -204,14 +251,22 @@ function renderHubs() {
     const series = (S.hub_load || {})[h] || [];
     const mbps = series.length ? series[series.length - 1][1] : 0;
     const keys = (S.host.hub_keys || {})[h] || [];
-    const keyTxt = keys.length ? keys.map((k) => k.split("#").slice(-1)[0]).join(", ") : "PC port not recorded yet";
-    return `<div class="hub"><div class="hub-head"><div class="hub-name"><span class="plug"></span>HUB ${esc(h)}</div>
-      <div class="hub-meta">${esc(c.hub_model.split("(")[0])} · PC port ${esc(keyTxt)}</div>
-      <div class="hub-stats"><span>active <b>${active}</b>/10</span><span>failed <b>${failed}</b></span><span>link <b>${fmtNum(mbps, 1)}</b> MB/s</span></div></div>
-      <div class="ports">${slots.map(portCard).join("")}</div></div>`;
+    const keyTxt = keys.length ? keys.map((k) => k.split("#").slice(-1)[0]).join(", ") : "";
+    const cols = slots.map((s) => {
+      const d = S.drives[s.drive];
+      return `<div class="slotcol">${portCard(s)}<div class="tip"></div>${stickArt(d, d ? visual(d) : null)}</div>`;
+    }).join("");
+    return `<div class="hubviz"><div class="hub-head"><div class="hub-name"><span class="plug"></span>HUB ${esc(h)}</div>
+      <div class="hub-meta">${esc(c.hub_model.split("(")[0])}${keyTxt ? ` · plugged into PC port ${esc(keyTxt)}` : ""}</div>
+      <div class="hub-stats"><span>active <b>${active}</b>/10</span><span>failed <b>${failed}</b></span>
+        <span title="USB 2.0 link of the hub, shared by its 10 drives">link <b>${fmtNum(mbps, 1)}</b> / 40 MB/s
+        <span class="linkmeter${mbps > 40 ? " over" : ""}"><i style="width:${Math.min(100, (100 * mbps) / 40)}%"></i></span></span></div></div>
+      <div class="hubviz-scroll"><div class="hubviz-inner">
+        <div class="rack"><div></div>${cols}<div></div></div>${hubBody(h, slots, keyTxt)}
+      </div></div></div>`;
   }).join("");
   $("#hubs").innerHTML = html;
-  $$("#hubs .port[data-drive]").forEach((el) => (el.onclick = () => openDrawer(el.dataset.drive)));
+  $$("#hubs [data-drive]").forEach((el) => (el.onclick = () => openDrawer(el.dataset.drive)));
 }
 
 /* ---------- charts ------------------------------------------------------------------------ */
@@ -482,6 +537,7 @@ function renderSetup() {
       <li>Plug each hub's 12 V adapter in (one power strip), switch every port switch <b>on</b> and leave them on.</li>
       <li>Plug each hub's cable straight into a <b>rear</b> USB port of the PC (not the front panel, no extension, never one hub into the other). Use two ports far apart, ideally on different USB controllers.</li>
       <li>Keyboard and mouse stay on other PC ports. No test drive goes into the PC itself; the two spare drives stay unplugged except for the self-test and the post-test port checks.</li>
+      <li>If Windows says “Not enough USB controller resources” while you plug in drives, move hub B to a port on another USB controller (Device Manager → View → Devices by connection), or give it a PCIe USB 3.0 card.</li>
       <li>Stick a label with the drive ID on every stick, and number the hub ports 1–10.</li></ul>
       ${planGrid("A", nextId)}${planGrid("B", nextId)}<div class="small muted">Spares: ${spares.map(esc).join(", ")}</div>`)}
     ${step(3, selftest && selftest.passed ? "done" : nextSpare ? "now" : "", "Enroll a spare and run the self-test", `<p class="muted">Plug in spare <b>${esc(spares[0])}</b> (any hub port), enroll it below, then run the self-test (≈ 2 minutes). Do the same with <b>${esc(spares[1])}</b>, then unplug both spares and keep them for the post-test.</p>
