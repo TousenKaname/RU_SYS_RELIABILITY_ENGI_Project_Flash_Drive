@@ -285,8 +285,8 @@ class Worker:
         next_live = next_run = 0.0
         while True:
             now = time.monotonic()
-            if now >= next_run:  # "End test now" moves the stop time forward
-                next_run = now + 5.0
+            if now >= next_run:  # "End test now" moves the stop time forward: seen within 0.5 s
+                next_run = now + 0.5
                 stop_at = (self.cstore.run_state() or {}).get("stop_at")
                 if stop_at:
                     try:
@@ -997,8 +997,10 @@ class Worker:
             return
         st.status = Status.CENSORED.value
         st.censored_at = iso()
+        end = min(utc_now(), self.stop_at) if self.stop_at else utc_now()  # Type I: censored at the stop
+        hours = round((end - self.started_at).total_seconds() / 3600.0, 4)
         self.ds.event("censored", st.cycles_done, cycles_done=st.cycles_done, dose=st.cum.to_json(),
-                      hours_on_test=self._hours(), fdw=round(self._fdw(), 4))
+                      hours_on_test=hours, fdw=round(self._fdw(), 4))
         self._save()
 
 

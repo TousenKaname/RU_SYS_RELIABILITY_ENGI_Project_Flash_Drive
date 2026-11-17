@@ -640,7 +640,8 @@ function renderData() {
   const sel = $("#note-drive");
   if (sel.options.length <= 1) Object.keys(S.drives).sort().forEach((id) => sel.add(new Option(id, id)));
   const ex = (S.jobs || []).filter((j) => j.kind === "export" && j.status === "done").slice(-1)[0];
-  $("#export-result").innerHTML = ex ? `Last export: <code>${esc(ex.result.zip)}</code> (${fmtNum(ex.result.files)} files, ${fmtMB(ex.result.size)})` : "";
+  $("#export-result").innerHTML = ex ? `Last export: <code>${esc(ex.result.zip)}</code> (${fmtNum(ex.result.files)} files, ${fmtMB(ex.result.size)})` +
+    (ex.result.final === false ? `<div style="color:var(--warn);margin-top:4px">Snapshot taken while the test was ${esc(String(ex.result.phase).toUpperCase())}: export again once it shows STOPPED for the final data.</div>` : "") : "";
   const ph = S.run.phase;
   $("#btn-pause").disabled = ph !== "running";
   $("#btn-resume").disabled = ph !== "paused";

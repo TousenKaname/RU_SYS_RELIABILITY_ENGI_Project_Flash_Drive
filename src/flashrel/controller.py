@@ -432,7 +432,8 @@ class Controller:
                 state.status = Status.CENSORED.value
                 state.censored_at = iso()
                 state.pending_recovery = None
-                hours = round((utc_now() - started).total_seconds() / 3600, 4)
+                end = min(utc_now(), parse_iso(self.run["stop_at"])) if self.run.get("stop_at") else utc_now()
+                hours = round((end - started).total_seconds() / 3600, 4)
                 ds.event("censored", state.cycles_done, cycles_done=state.cycles_done,
                          dose=state.cum.to_json(), hours_on_test=hours, by="controller",
                          text="no worker was running at the stop; censored at the cycles completed")

@@ -419,3 +419,40 @@ def test_the_retention_check_reads_the_cycle_cut_at_the_stop(tmp_path):
     ds.event("interrupted", 6, at_stop_time=True, free_before=200, workload="large", files_written=9)
     info = _leftover_cycle(cs, "A8-06", state)
     assert info["cycle"] == 6 and info["files_written"] == 9
+
+
+# -- ending early -------------------------------------------------------------------------------
+def test_end_now_reaches_a_running_worker_within_a_second(tmp_path, sim_campaign):
+    from flashrel.timeutil import parse_iso
+
+    plat, cs, _ = _rig(tmp_path, sim_campaign, ["A16-04"])
+    stop = _running(cs, sim_campaign, 120)
+    w = Worker(sim_campaign, cs, "A16-04", plat)
+    t = threading.Thread(target=w.main, daemon=True)
+    t.start()
+    time.sleep(3)
+    run = cs.run_state()
+    run["stop_at"] = iso()  # what "End test now" does
+    cs.save_run_state(run)
+    t0 = time.monotonic()
+    t.join(30)
+    stop.set()
+    assert time.monotonic() - t0 < 5
+    stop_at = parse_iso(run["stop_at"])
+    late = [r for r in cs.drive("A16-04").read_cycles() if (parse_iso(r["ended_at"]) - stop_at).total_seconds() > 1.0]
+    assert not late  # no cycle (and no failure) is booked after the stop time
+    censored = next(e for e in cs.drive("A16-04").read_events() if e["type"] == "censored")
+    started = parse_iso(run["started_at"])
+    assert censored["detail"]["hours_on_test"] <= (stop_at - started).total_seconds() / 3600 + 1e-4
+
+
+def test_an_export_before_the_stop_is_marked_as_a_snapshot(tmp_path, sim_campaign):
+    from flashrel.export import export_zip
+
+    plat, cs, _ = _rig(tmp_path, sim_campaign, ["S8-01"])
+    cs.save_run_state({"phase": "stopping", "started_at": iso()})
+    snap = export_zip(sim_campaign, cs, tmp_path / "exp")
+    assert snap["zip"].endswith("_stopping.zip") and snap["final"] is False
+    cs.save_run_state({"phase": "stopped", "started_at": iso()})
+    final = export_zip(sim_campaign, cs, tmp_path / "exp2")
+    assert final["final"] is True and not final["zip"].endswith("_stopped.zip")

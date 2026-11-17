@@ -121,7 +121,11 @@ def export_zip(campaign: Campaign, cstore: CampaignStore, exports_dir: str | Pat
     exports_dir = Path(exports_dir)
     exports_dir.mkdir(parents=True, exist_ok=True)
     stamp = utc_now().astimezone().strftime("%Y%m%d-%H%M")
-    target = exports_dir / f"{campaign.name}_{stamp}.zip"
+    # The final data exist once the test is stopped; an earlier export is a snapshot
+    # (a backup during the test, or drives still stopping) and says so in its name.
+    phase = (cstore.run_state() or {}).get("phase") or "setup"
+    final = phase in ("stopped", "finished")
+    target = exports_dir / f"{campaign.name}_{stamp}{'' if final else '_' + phase}.zip"
     n_files = 0
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
         for base, _dirs, files in os.walk(cstore.dir):
@@ -136,4 +140,5 @@ def export_zip(campaign: Campaign, cstore: CampaignStore, exports_dir: str | Pat
                 except OSError:
                     continue
     cstore.operator("export", zip=str(target), files=n_files)
-    return {"zip": str(target), "files": n_files, "size": target.stat().st_size, "time": iso(), **summary}
+    return {"zip": str(target), "files": n_files, "size": target.stat().st_size, "time": iso(),
+            "phase": phase, "final": final, **summary}
