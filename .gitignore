@@ -1,26 +1,14 @@
-# Python
 __pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
-.venv/
-venv/
+*.pyc
 .pytest_cache/
-.ruff_cache/
-
-# Test data and outputs (logs can be large; keep them in the synced data folder)
-data/
-data-sim/
-reports/
-
-# Local configuration
-configs/probes.yaml
-
-# Editors and OS
-.vscode/
-.idea/
+.venv/
+tools/.cache/
+dist/
+sim-data/
+*.egg-info/
 .DS_Store
-Thumbs.db
-desktop.ini
+uv.lock
+# Test records stay in the synced data folder (run-1 logs carry the lab PC's user paths)
+data/
+# Shows a local path of the development machine
+docs/dashboard_setup_sim.png

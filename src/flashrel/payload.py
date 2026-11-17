@@ -1,13 +1,11 @@
-"""Deterministic test payloads.
+"""Deterministic test payloads (unchanged in substance from run 1).
 
-The harness keeps no source files on the host. Every file it writes to a drive
-is generated from a 64-bit key, so the expected bytes can be regenerated at any
-time, both for byte-exact verification and for diagnosing a corrupted chunk.
-This also keeps the host's own disk out of the data path: a mismatch can only
-come from the drive, the USB link, or host memory, never from a corrupted
-source file.
+The rig keeps no source files on the host. Every file it writes is generated from a
+64-bit key, so the expected bytes can be regenerated at any time for byte-exact
+verification and for diagnosing a bad chunk. The host disk therefore never enters
+the data path: a mismatch can only come from the drive, the USB link or host memory.
 
-Every chunk (1 MiB by default) begins with a 32-byte header
+Every chunk (1 MiB) starts with a 32-byte header
 
     offset  size  field
          0     6  magic b"FLSHRL"
@@ -17,27 +15,31 @@ Every chunk (1 MiB by default) begins with a 32-byte header
         20     4  file index within the cycle
         24     8  chunk index within the file
 
-followed by the SHAKE-128 output stream of (file key, chunk index), which is
-bit-exact on every platform and Python version. The header makes corrupted
-chunks traceable: stale data from an earlier cycle, data that belongs to
-another file, and erased pages each leave a distinct signature.
+followed by the SHAKE-128 stream of (file key, chunk index). The header makes a bad
+chunk traceable: stale data of an earlier cycle, data of another file, and erased
+pages each leave a distinct signature.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from flashrel.config import WorkloadSpec
+from flashrel.config import Workload
 
 HEADER = struct.Struct("<6sHQIIQ")
 MAGIC = b"FLSHRL"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 PAYLOAD_DIR = "FLASHREL-DATA"
+CHECK_DIR = "FLASHREL-CHECK"
+#: Planning never assumes clusters smaller than exFAT's default for 8-32 GB volumes, so a
+#: misreported cluster size can only under-fill a drive, never overfill it.
+MIN_PLANNING_CLUSTER = 32 * 1024
 
 
 def stable_key(*parts: object) -> int:
@@ -48,8 +50,6 @@ def stable_key(*parts: object) -> int:
 
 @dataclass(frozen=True)
 class FileSpec:
-    """One payload file: where it goes, how long it is, and its content key."""
-
     index: int
     relpath: str
     size: int
@@ -65,6 +65,7 @@ class CyclePlan:
     workload: str
     chunk_size: int
     files: tuple[FileSpec, ...]
+    root_dir: str = PAYLOAD_DIR
 
     @property
     def dirname(self) -> str:
@@ -73,6 +74,12 @@ class CyclePlan:
     @property
     def total_bytes(self) -> int:
         return sum(f.size for f in self.files)
+
+    def directories(self) -> list[str]:
+        seen: dict[str, None] = {}
+        for f in self.files:
+            seen.setdefault(f.relpath.rsplit("/", 1)[0], None)
+        return list(seen)
 
 
 def _round_up(n: int, unit: int) -> int:
@@ -84,51 +91,41 @@ def fill_budget(free_bytes: int, fill_fraction: float, reserve_bytes: int) -> in
     return max(0, min(int(free_bytes * fill_fraction), free_bytes - reserve_bytes))
 
 
-def plan_cycle(
-    *,
-    seed: int,
-    drive_id: str,
-    cycle: int,
-    workload: WorkloadSpec,
-    budget_bytes: int,
-    cluster_size: int,
-    chunk_size: int,
-) -> CyclePlan:
+def plan_cycle(*, seed: int, drive_id: str, cycle: int, workload: Workload, budget_bytes: int,
+               cluster_size: int, chunk_size: int, key_space: str | None = None,
+               root_dir: str = PAYLOAD_DIR) -> CyclePlan:
     """Draw file sizes until the allocated space reaches ``budget_bytes``.
 
-    Sizes are log-uniform in [min_size, max_size], so each size decade gets the
-    same number of files. Allocation is counted in whole clusters, because a
-    4 KiB file still occupies a full 32 KiB exFAT cluster. A final, shorter file
-    uses up the remaining budget so that every cycle fills the drive to the
-    same level.
+    Sizes are log-uniform in [min_size, max_size], so every size decade gets the same
+    number of files. Allocation is counted in whole clusters (a 4 KiB file still takes a
+    32 KiB exFAT cluster). A final, shorter file uses up the rest of the budget, so every
+    cycle fills the drive to the same level. ``key_space`` replaces the drive ID in the
+    content keys (recovery checks use a fresh one, so a drive can never pass a check by
+    returning data of an earlier check).
     """
-    if cluster_size <= 0:
-        raise ValueError("cluster_size must be positive")
-    rng = random.Random(stable_key(seed, drive_id, cycle, "sizes"))
+    cluster = max(int(cluster_size), MIN_PLANNING_CLUSTER)
+    ident = key_space or drive_id
+    rng = random.Random(stable_key(seed, ident, cycle, "sizes"))
     lo, hi = math.log(workload.min_size), math.log(workload.max_size)
     sizes: list[int] = []
     used = 0
     while True:
         size = int(math.exp(rng.uniform(lo, hi)))
-        need = _round_up(size, cluster_size)
+        need = _round_up(size, cluster)
         if used + need <= budget_bytes:
             sizes.append(size)
             used += need
             continue
-        last = (budget_bytes - used) // cluster_size * cluster_size
+        last = (budget_bytes - used) // cluster * cluster
         if last >= workload.min_size:
             sizes.append(last)
         break
     files = tuple(
-        FileSpec(
-            index=i,
-            relpath=f"d{i // workload.files_per_dir:04d}/f{i:06d}.bin",
-            size=size,
-            key=stable_key(seed, drive_id, cycle, i),
-        )
+        FileSpec(index=i, relpath=f"d{i // workload.files_per_dir:04d}/f{i:06d}.bin", size=size,
+                 key=stable_key(seed, ident, cycle, i))
         for i, size in enumerate(sizes)
     )
-    return CyclePlan(drive_id, cycle, workload.name, chunk_size, files)
+    return CyclePlan(drive_id, cycle, workload.name, chunk_size, files, root_dir)
 
 
 def chunk_count(size: int, chunk_size: int) -> int:
@@ -150,3 +147,20 @@ def expected_chunk(spec: FileSpec, cycle: int, chunk_index: int, chunk_size: int
 def iter_expected(spec: FileSpec, cycle: int, chunk_size: int) -> Iterator[bytes]:
     for i in range(chunk_count(spec.size, chunk_size)):
         yield expected_chunk(spec, cycle, i, chunk_size)
+
+
+# -- files written once at intake -------------------------------------------------------------
+def identity_bytes(record: dict) -> bytes:
+    """Canonical bytes of the identity file (sorted keys, so it can be rebuilt exactly)."""
+    return (json.dumps(record, indent=1, sort_keys=True) + "\n").encode("utf-8")
+
+
+def sentinel_bytes(drive_id: str, token: str, size: int) -> bytes:
+    """Content of FLASHREL-SENTINEL.bin: a header line, then a SHAKE-128 stream.
+
+    The file is written once, right after the identity file, so it lies next to the
+    file-system records at the start of the volume, where run 1 found the damage.
+    """
+    head = f"FLASHREL-SENTINEL v2 {drive_id} {token}\n".encode("ascii")
+    seed = hashlib.sha256(head).digest()
+    return head + hashlib.shake_128(seed).digest(max(0, size - len(head)))

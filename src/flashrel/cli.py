@@ -1,365 +1,184 @@
-"""Command-line interface: ``flashrel <command> ...`` (see ``flashrel --help``)."""
+"""Command line: ``python -m flashrel <command>``.
+
+    app        the rig: controller + dashboard (what "Start FlashRel.bat" runs)
+    worker     one drive's worker (started by the controller, not by hand)
+    preflight  quick self-check of the installation (run by the launcher)
+    status     print the state of every drive of a campaign
+    export     write the life table, the workbook and a ZIP of the data folder
+"""
 
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import json
+import os
 import sys
-import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
+import time
 from pathlib import Path
 
-from flashrel import __version__
-from flashrel.config import load_campaign
-from flashrel.failure import DriveStatus, Event, EventType
-from flashrel.recorder import DriveBusy, DriveLog, drive_lock
-from flashrel.system.volumes import candidate_mounts, read_identity, wait_for_drive
-from flashrel.units import format_bytes
+
+def _package_dir() -> Path:
+    """The folder of the packaged rig (app/ sits inside it), or the source checkout."""
+    here = Path(__file__).resolve().parent  # .../app/flashrel or .../src/flashrel
+    return here.parent.parent
 
 
-def _campaign(args):
-    return load_campaign(args.config)
+def _defaults() -> dict[str, str]:
+    root = _package_dir()
+    return {"config": str(root / "config" / "campaign.toml"), "data": str(root / "data"),
+            "exports": str(root / "exports")}
 
 
-class CommandError(RuntimeError):
-    """A refused operator command; the message says why and what to do."""
+def _redirect_output(log_path: Path) -> None:
+    """pythonw.exe has no console: send output to the controller log."""
+    if sys.stdout is None or sys.stderr is None or os.environ.get("FLASHREL_LOG_TO_FILE"):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(log_path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = fh
+        sys.stderr = fh
 
 
-@contextmanager
-def _operating_on(campaign, drive_id: str) -> Iterator[tuple[DriveLog, object]]:
-    """Exclusive access to a drive's state for an operator command.
+def cmd_app(args: argparse.Namespace) -> int:
+    from flashrel.controller import AlreadyRunning, Controller
+    from flashrel.platform import get_platform
+    from flashrel.server import serve
 
-    Holding the worker's own lock means a command can never race a running
-    worker: it either waits for the operator to stop the worker or refuses.
-    """
-    if drive_id not in campaign.assignments:
-        raise CommandError(f"{drive_id} is not part of campaign {campaign.name}")
+    data = Path(args.data)
+    data.mkdir(parents=True, exist_ok=True)
+    sim_root = None
+    if args.sim:
+        sim_root = str(Path(args.sim_root or (data / "_sim")).resolve())
+    _redirect_output(data / "controller.log")
+    platform = get_platform(sim_root, args.sim_speed)
     try:
-        with drive_lock(campaign.name, drive_id):
-            log = DriveLog(campaign.run_dir, drive_id)
-            yield log, log.reconcile(log.load_state())
-    except DriveBusy:
-        raise CommandError(f"{drive_id} is being tested by a worker on this host; stop it "
-                           "first (Ctrl+C its supervisor)") from None
-
-
-# -- harness commands ---------------------------------------------------------------------
-def cmd_discover(args) -> int:
-    found = False
-    for mount in candidate_mounts():
-        ident = read_identity(mount)
-        if ident:
-            found = True
-            print(f"{ident.get('drive_id', '?'):8} {mount}  (enrolled {ident.get('enrolled_at')}, "
-                  f"campaign {ident.get('campaign', '?')})")
-    if not found:
-        print("no enrolled drives are mounted")
-    return 0
-
-
-def cmd_enroll(args) -> int:
-    from flashrel.intake import EnrollmentError, enroll
-
-    campaign = _campaign(args)
-    try:
-        with drive_lock(campaign.name, args.drive):
-            record = enroll(Path(args.mount), campaign, args.drive,
-                            capacity_test=args.capacity_test, force=args.force)
-    except DriveBusy:
-        raise CommandError(f"{args.drive} is being tested on this host; stop its worker first")
-    except EnrollmentError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print(json.dumps(record, indent=2))
-    if record.get("verdict") not in (None, "pass"):
-        print("capacity screening FAILED: keep this drive out of the campaign", file=sys.stderr)
-        return 1
-    return 0
-
-
-def cmd_run(args) -> int:
-    from flashrel.runner import Supervisor
-    from flashrel.sensors import SerialTemperatureSource
-
-    temperature = None
-    if args.temperature_port:
-        names = {}
-        if args.probe_map:
-            import yaml
-
-            names = yaml.safe_load(Path(args.probe_map).read_text(encoding="utf-8")) or {}
-        temperature = SerialTemperatureSource(args.temperature_port, names)
-    drives = args.drives.split(",") if args.drives else None
-    Supervisor(args.config, args.host, drives, temperature=temperature,
-               status_period_s=args.status_every).run()
-    return 0
-
-
-def cmd_status(args) -> int:
-    campaign = _campaign(args)
-    print(f"{'drive':8} {'host':4} {'port':10} {'status':10} {'cycles':>6} {'written':>10} "
-          f"{'soft':>4}  last outcome      write MB/s  read MB/s  updated")
-    for drive_id, a in campaign.assignments.items():
-        log = DriveLog(campaign.run_dir, drive_id)
-        state = log.load_state()
-        rows = log.read_cycles()
-        last = rows[-1] if rows else {}
-        print(f"{drive_id:8} {a.host:4} {state.port or a.port:10} {state.status.value:10} "
-              f"{state.cycles_done:>6} {format_bytes(state.bytes_written):>10} "
-              f"{len(state.soft_failures):>4}  {last.get('outcome', '-'):16} "
-              f"{last.get('write_mbps', '-'):>10} {last.get('verify_mbps', '-'):>10}  "
-              f"{state.updated_at or '-'}")
-    return 0
-
-
-def cmd_recheck(args) -> int:
-    from flashrel.cycle import Outcome
-    from flashrel.runner import check_drive, check_summary
-
-    campaign = _campaign(args)
-    with _operating_on(campaign, args.drive) as (log, state):
-        if state.status is not DriveStatus.ATTENTION:
-            raise CommandError(f"{args.drive} is {state.status.value}; recheck is only for "
-                               "drives in the attention state")
-        mount = wait_for_drive(args.drive, timeout_s=args.wait)
-        if mount is None:
-            raise CommandError(f"{args.drive} is not mounted; plug it in and try again")
-        old_port = state.port or campaign.assignments[args.drive].port
-        port, host = args.port or old_port, args.host or state.host
-        result = check_drive(mount, campaign, args.drive, host=host, port=port)
-        summary = check_summary(result)
-        print(json.dumps(summary, indent=2))
-        if result.outcome is not Outcome.PASS:
-            log.append_event(Event(args.drive, state.cycles_done, EventType.ATTENTION, "", {
-                "reason": "operator re-check failed", "port": port, "host": host,
-                "check": summary}))
-            print("check FAILED on a second port: record the hard failure with `flashrel retire`",
-                  file=sys.stderr)
-            return 1
-        log.append_event(Event(args.drive, state.cycles_done, EventType.RECOVERED, "D2", {
-            "recovered_by": "operator re-check", "port": port, "host": host,
-            "moved_port": port != old_port, "check": summary}))
-        state.status, state.port, state.host = DriveStatus.ACTIVE, port, host
-        log.save_state(state)
-    print(f"{args.drive} is active again on {host or 'its host'} port {port}")
-    if port != old_port:
-        print(f"the drive passed on a new port: test port {old_port} with the spare drive "
-              "(`flashrel portcheck`) and log `flashrel port-fault` if the spare fails there")
-    return 0
-
-
-def cmd_portcheck(args) -> int:
-    from flashrel.cycle import Outcome
-    from flashrel.runner import check_drive, check_summary
-
-    campaign = _campaign(args)
-    ident = read_identity(Path(args.mount)) or {}
-    if ident.get("drive_id") in campaign.assignments:
-        raise CommandError(f"{args.mount} holds test drive {ident['drive_id']}; port checks "
-                           "use the spare drive only")
-    result = check_drive(Path(args.mount), campaign, "REF", port=args.port)
-    print(json.dumps(check_summary(result), indent=2))
-    ok = result.outcome is Outcome.PASS
-    print(f"port {args.port}: {'OK' if ok else 'FAULTY (spare drive failed)'}")
-    return 0 if ok else 1
-
-
-def cmd_port_fault(args) -> int:
-    campaign = _campaign(args)
-    with _operating_on(campaign, args.drive) as (log, state):
-        if args.cycle not in log.failure_cycles():
-            raise CommandError(f"cycle {args.cycle} of {args.drive} is not a logged failure")
-        log.append_event(Event(args.drive, args.cycle, EventType.PORT_FAULT, "F5", {
-            "failure_cycle": args.cycle, "port": args.port, "reason": args.reason}))
-        state.soft_failures = log.failure_cycles()
-        log.save_state(state)
-    print(f"cycle-{args.cycle} failure of {args.drive} re-attributed to port {args.port} (F5)")
-    return 0
-
-
-def cmd_retire(args) -> int:
-    campaign = _campaign(args)
-    with _operating_on(campaign, args.drive) as (log, state):
-        if state.status in (DriveStatus.FAILED, DriveStatus.CENSORED):
-            raise CommandError(f"{args.drive} is already {state.status.value}")
-        log.append_event(Event(args.drive, state.cycles_done, EventType.HARD_FAILURE,
-                               args.code, {"reason": args.reason, "retired_by": "operator"}))
-        state.status = DriveStatus.FAILED
-        log.save_state(state)
-    print(f"{args.drive} retired at cycle {state.cycles_done} ({args.code})")
-    return 0
-
-
-def cmd_note(args) -> int:
-    campaign = _campaign(args)
-    detail = {"text": args.text}
-    if not args.port:  # a plain note only appends an event, safe while the worker runs
-        log = DriveLog(campaign.run_dir, args.drive)
-        log.append_event(Event(args.drive, log.load_state().cycles_done, EventType.NOTE, "",
-                               detail))
+        ctrl = Controller(config_path=args.config, data_dir=str(data), exports_dir=args.exports,
+                          platform=platform, package_dir=str(_package_dir()), sim_root=sim_root,
+                          sim_speed=args.sim_speed, sim_hours=args.sim_hours)
+    except AlreadyRunning as exc:
+        print(f"FlashRel is already running: {exc.url}", flush=True)
+        try:
+            (data / "dashboard_url.txt").write_text(exc.url + "\n", encoding="ascii")
+        except OSError:
+            pass
+        if not args.no_browser:
+            platform.open_url(exc.url)
         return 0
-    with _operating_on(campaign, args.drive) as (log, state):
-        detail["port"] = state.port = args.port
-        log.save_state(state)
-        log.append_event(Event(args.drive, state.cycles_done, EventType.NOTE, "", detail))
+    httpd, url = serve(ctrl, args.port)
+    print(f"FlashRel Rig {ctrl.campaign.name} on {platform.name}: {url}", flush=True)
+    try:  # the launcher waits for this file to confirm the start
+        (data / "dashboard_url.txt").write_text(url + "\n", encoding="ascii")
+    except OSError:
+        pass
+    import signal
+
+    for sig in ("SIGTERM", "SIGBREAK"):  # stop the workers cleanly, as the dashboard button does
+        if hasattr(signal, sig):
+            signal.signal(getattr(signal, sig), lambda *_: ctrl.shutdown_requested.set())
+    ctrl.start_background()
+    if not args.no_browser:
+        platform.open_url(url)
+    try:
+        ctrl.loop_forever()
+    except KeyboardInterrupt:
+        print("stopping (Ctrl+C): workers end after the current file ...", flush=True)
+        ctrl.shutdown_requested.set()
+    finally:
+        httpd.shutdown()
     return 0
 
 
-def cmd_selftest(args) -> int:
-    """Run a clean cycle and a fault-injected cycle on a local folder."""
-    from flashrel.config import CycleSpec, WorkloadSpec
-    from flashrel.cycle import Outcome, run_cycle
-    from flashrel.payload import plan_cycle
-    from flashrel.system.directio import cache_bypass_supported
-    from flashrel.units import KiB, MiB
+def cmd_preflight(args: argparse.Namespace) -> int:
+    """Checks the launcher runs before starting the rig in the background."""
+    problems = []
+    try:
+        import ctypes  # noqa: F401
+        import tomllib  # noqa: F401
 
-    work = Path(args.dir) if args.dir else Path(tempfile.mkdtemp(prefix="flashrel-selftest-"))
-    work.mkdir(parents=True, exist_ok=True)
-    spec = CycleSpec(retries=1, retry_backoff_s=0)
-    workload = WorkloadSpec("selftest", 4 * KiB, 4 * MiB, 32)
+        from flashrel import controller, server  # noqa: F401
+        from flashrel.config import load_campaign
+        from flashrel.platform import get_platform
 
-    def planner(volume):
-        return plan_cycle(seed=1, drive_id="SELFTEST", cycle=1, workload=workload,
-                          budget_bytes=32 * MiB, cluster_size=volume.cluster_size,
-                          chunk_size=spec.chunk_size)
-
-    def flip(cycle_dir, plan):
-        target = cycle_dir / plan.files[0].relpath
-        raw = bytearray(target.read_bytes())
-        raw[len(raw) // 3] ^= 0x01
-        target.write_bytes(bytes(raw))
-
-    clean = run_cycle(work, planner, spec, drive_id="SELFTEST", cycle=1, workload="selftest")
-    faulty = run_cycle(work, planner, spec, drive_id="SELFTEST", cycle=1, workload="selftest",
-                       fault_hook=flip)
-    if clean.verify_device_reads is None:  # Windows: FILE_FLAG_NO_BUFFERING reads the device
-        reached = ("read-back reaches the device (unbuffered I/O)", cache_bypass_supported())
-    else:
-        reached = (f"read-back reaches the device ({clean.verify_device_reads} block reads "
-                   "measured)", clean.verify_device_reads > 0)
-    checks = {
-        "cache bypass available": cache_bypass_supported(),
-        reached[0]: reached[1],
-        "clean cycle passes": clean.outcome is Outcome.PASS,
-        "injected bit flip detected": faulty.outcome is Outcome.CORRUPTION
-        and faulty.bits_corrupt == 1,
-    }
-    print(f"self-test in {work}: write {clean.write.mbps:.1f} MB/s, "
-          f"read {clean.verify.mbps:.1f} MB/s ({clean.planned_files} files)")
-    for name, ok in checks.items():
-        print(f"  [{'ok' if ok else 'FAIL'}] {name}")
-    if not reached[1]:
-        print("  the read-back came from the host cache: do not trust this host's results",
-              file=sys.stderr)
-    return 0 if all(checks.values()) else 1
+        campaign = load_campaign(args.config)
+        platform = get_platform()
+        print(f"campaign {campaign.name}: {len(campaign.test_drives())} drives, "
+              f"{campaign.duration_h:g} h; platform {platform.name}; admin {platform.is_admin()}")
+    except Exception as exc:
+        problems.append(f"{type(exc).__name__}: {exc}")
+    data = Path(args.data)
+    try:
+        data.mkdir(parents=True, exist_ok=True)
+        probe = data / ".write-test"
+        probe.write_text("ok")
+        probe.unlink()
+    except OSError as exc:
+        problems.append(f"cannot write to {data}: {exc}")
+    for p in problems:
+        print("PROBLEM:", p)
+    return 1 if problems else 0
 
 
-# -- analysis commands --------------------------------------------------------------------
-def cmd_export(args) -> int:
-    from flashrel.analysis.export import write_workbook
+def cmd_status(args: argparse.Namespace) -> int:
+    from flashrel.config import load_campaign
+    from flashrel.store import CampaignStore
 
-    path = write_workbook(_campaign(args), Path(args.out))
-    print(f"wrote {path}")
+    campaign = load_campaign(args.config)
+    cstore = CampaignStore(args.data, campaign.name)
+    print(f"{'drive':8} {'hub':4} {'status':11} {'cycles':>6} {'fail':>4} {'first failure':16} {'FDW':>7}")
+    for unit in campaign.test_drives():
+        ds = cstore.drive(unit)
+        st = ds.load_state() or {}
+        rec = ds.load_intake() or {}
+        slot = campaign.slot_of(unit)
+        first = st.get("first_failure") or {}
+        usable = int(rec.get("usable_bytes") or 0)
+        fdw = (st.get("cum") or {}).get("bytes_written", 0) / usable if usable else 0
+        ff = f"c{first['cycle']} {first['code']}" if first else ""
+        print(f"{unit:8} {slot.label if slot else '':4} {st.get('status', 'not enrolled'):11} "
+              f"{st.get('cycles_done', 0):>6} {len(st.get('failure_cycles') or []):>4} {ff:16} {fdw:7.2f}")
     return 0
 
 
-def cmd_analyze(args) -> int:
-    from flashrel.analysis.report import analyze_campaign
+def cmd_export(args: argparse.Namespace) -> int:
+    from flashrel.config import Campaign, load_campaign
+    from flashrel.export import export_zip
+    from flashrel.store import CampaignStore, read_json
 
-    for name, path in analyze_campaign(_campaign(args), Path(args.out)).items():
-        print(f"{name:16} {path}")
+    campaign = load_campaign(args.config)
+    cstore = CampaignStore(args.data, campaign.name)
+    frozen = read_json(cstore.campaign_json)
+    if frozen:
+        campaign = Campaign.from_json(frozen)
+    result = export_zip(campaign, cstore, args.exports)
+    print(f"wrote {result['zip']} ({result['files']} files, {result['size'] / 1e6:.1f} MB)")
     return 0
-
-
-def cmd_simulate(args) -> int:
-    from flashrel.analysis.planning import cycles_in, rotation_hours
-    from flashrel.analysis.simulate import REHEARSAL_TRUTH, simulate_campaign
-
-    campaign = _campaign(args)
-    target = dataclasses.replace(campaign, data_dir=Path(args.out).resolve())
-    horizon = {}
-    for code, group in campaign.inventory.groups.items():
-        truth = REHEARSAL_TRUTH.get(code)
-        if truth is None:
-            continue
-        speeds = {w: (truth.write_mbps[w], truth.read_mbps[w]) for w in campaign.rotation}
-        horizon[code] = int(cycles_in(args.days, rotation_hours(group.capacity_gb, speeds)))
-    simulate_campaign(target, horizon, seed=args.seed)
-    print(f"simulated logs for {len(target.assignments)} drives in {target.run_dir}")
-    print("these are rehearsal data from made-up parameters, not measurements")
-    return 0
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="flashrel", description=__doc__)
-    p.add_argument("--version", action="version", version=f"flashrel {__version__}")
-    sub = p.add_subparsers(dest="command", required=True)
-
-    def add(name, func, help_, config=True):
-        sp = sub.add_parser(name, help=help_, description=help_)
-        if config:
-            sp.add_argument("config", help="campaign YAML file, e.g. configs/campaign.yaml")
-        sp.set_defaults(func=func)
-        return sp
-
-    add("discover", cmd_discover, "list mounted drives that carry an identity file", False)
-    sp = add("enroll", cmd_enroll, "label a drive for the campaign")
-    sp.add_argument("--drive", required=True)
-    sp.add_argument("--mount", required=True, help="drive letter or mount point, e.g. E:\\")
-    sp.add_argument("--capacity-test", action="store_true",
-                    help="also fill 99 %% of the drive and read it back (one full pass)")
-    sp.add_argument("--force", action="store_true", help="enroll even if the volume is not empty")
-    sp = add("run", cmd_run, "cycle every drive assigned to this host until stopped")
-    sp.add_argument("--host", required=True, help="host name used in the campaign, e.g. W")
-    sp.add_argument("--drives", help="comma-separated subset of the host's drives")
-    sp.add_argument("--temperature-port", help="serial port of the Arduino, e.g. COM5")
-    sp.add_argument("--probe-map", help="YAML mapping probe ROM codes to names")
-    sp.add_argument("--status-every", type=float, default=60.0, help="seconds between tables")
-    add("status", cmd_status, "show every drive's progress")
-    sp = add("recheck", cmd_recheck, "re-check a drive that needs attention")
-    sp.add_argument("--drive", required=True)
-    sp.add_argument("--port", help="port the drive is plugged into now")
-    sp.add_argument("--host", help="host label, if it changed")
-    sp.add_argument("--wait", type=float, default=30.0)
-    sp = add("portcheck", cmd_portcheck, "test a port with the spare drive")
-    sp.add_argument("--port", required=True)
-    sp.add_argument("--mount", required=True, help="mount point of the spare drive")
-    sp = add("port-fault", cmd_port_fault, "re-attribute a cycle failure to a faulty port (F5)")
-    sp.add_argument("--drive", required=True)
-    sp.add_argument("--cycle", type=int, required=True)
-    sp.add_argument("--port", required=True)
-    sp.add_argument("--reason", required=True)
-    sp = add("retire", cmd_retire, "record a hard failure and stop testing a drive")
-    sp.add_argument("--drive", required=True)
-    sp.add_argument("--code", required=True, choices=["F1", "F2", "F3", "F4", "F6"])
-    sp.add_argument("--reason", required=True)
-    sp = add("note", cmd_note, "log an operator note (and optionally a port change)")
-    sp.add_argument("--drive", required=True)
-    sp.add_argument("--port")
-    sp.add_argument("text")
-    sp = add("selftest", cmd_selftest, "check the harness on this computer", False)
-    sp.add_argument("--dir", help="folder to test in (default: a new temp folder)")
-    sp = add("export", cmd_export, "write the campaign Excel workbook")
-    sp.add_argument("--out", required=True)
-    sp = add("analyze", cmd_analyze, "life table, Weibull fits, MCF, degradation, figures")
-    sp.add_argument("--out", required=True)
-    sp = add("simulate", cmd_simulate, "write synthetic rehearsal logs for a campaign")
-    sp.add_argument("--out", required=True, help="data folder for the synthetic logs")
-    sp.add_argument("--days", type=float, default=1.0)
-    sp.add_argument("--seed", type=int, default=1)
-    return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    try:
-        return int(args.func(args) or 0)
-    except CommandError as exc:
-        print(f"refused: {exc}", file=sys.stderr)
-        return 2
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "worker":
+        from flashrel.worker import worker_main
+
+        return worker_main(argv[1:])
+    d = _defaults()
+    p = argparse.ArgumentParser(prog="flashrel", description="FlashRel Rig 2 - USB flash drive life test")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    for name in ("app", "preflight", "status", "export"):
+        s = sub.add_parser(name)
+        s.add_argument("--config", default=d["config"])
+        s.add_argument("--data", default=d["data"])
+        s.add_argument("--exports", default=d["exports"])
+        if name == "app":
+            s.add_argument("--port", type=int, default=8585)
+            s.add_argument("--no-browser", action="store_true")
+            s.add_argument("--resume", action="store_true", help="(used by the auto-resume task)")
+            s.add_argument("--sim", action="store_true", help="simulated drives (demo / development)")
+            s.add_argument("--sim-root")
+            s.add_argument("--sim-speed", type=float, default=20.0)
+            s.add_argument("--sim-hours", type=float, default=0.5)
+    args = p.parse_args(argv)
+    # (--resume needs no delay here: the controller itself waits 20 s before it restarts the
+    # workers, and each worker waits up to 2 min for its stick to appear.)
+    return {"app": cmd_app, "preflight": cmd_preflight, "status": cmd_status, "export": cmd_export}[args.cmd](args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

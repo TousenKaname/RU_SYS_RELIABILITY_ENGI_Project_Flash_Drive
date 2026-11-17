@@ -1,0 +1,220 @@
+# FlashRel Rig -- campaign definition of run 2 (ISE 16:540:585, Project 4, Group 4).
+#
+# 20 USB flash drives on two 10-port hubs, copy -> verify -> delete cycling for 5 days.
+# The cycle is the same as in run 1 (fall2026, Oct 23-24), so run 1 serves as the pilot
+# and both runs can be analysed together. What changed is listed in docs/test_plan_run2.md.
+#
+# The operator does not need to edit this file. The software freezes it into
+# data/<campaign>/campaign.json when the test starts.
+
+[campaign]
+name = "fall2026b"
+title = "Run 2: 20 drives on two 10-port hubs, 5-day life test"
+seed = 20261116
+duration_h = 120          # Type I censoring: drives still working 120 h after the start are censored
+stagger_s = 15            # workers start 15 s apart, alternating between the hubs
+
+[cycle]
+fill_fraction = 0.90      # each cycle fills 90 % of the free space ...
+reserve = "64MiB"         # ... and never the last 64 MiB
+chunk_size = "1MiB"
+fsync = "per_file"        # every file is flushed to the drive before the next one
+readback = "uncached"     # verification reads bypass the host cache (FILE_FLAG_NO_BUFFERING)
+retries = 2               # an error is retried twice (after 5 s and 10 s)
+retry_backoff_s = 5
+rotation = ["large", "medium", "small"]   # cycle k uses rotation[(k - 1) mod 3], as in run 1
+
+[workloads.large]
+min_size = "512MiB"
+max_size = "2GiB"
+files_per_dir = 8
+
+[workloads.medium]
+min_size = "1MiB"
+max_size = "64MiB"
+files_per_dir = 64
+
+[workloads.small]
+min_size = "4KiB"
+max_size = "256KiB"
+files_per_dir = 256
+
+[sentinel]
+# New in run 2: data at rest and file-system records are re-read around the host cache
+# every 10 minutes during every phase, so a failure is time-stamped when it happens.
+interval_min = 10
+file_size = "1MiB"        # FLASHREL-SENTINEL.bin, written once at intake, never changed
+raw_checks = true         # exFAT boot-region and up-case checksums, root-directory entry sets
+confirm_reads = 3         # an anomaly must persist over 3 reads ...
+confirm_gap_s = 5         # ... 5 s apart before it counts
+
+[failure]
+baseline_cycles = 2       # D1: first two passing cycles of each workload set the baseline
+slow_fraction = 0.5       # D1: write throughput below 50 % of baseline ...
+slow_window = 3           # ... for three consecutive cycles of that workload
+reconnect_timeout_s = 120 # wait this long for a vanished drive to come back
+hang_timeout_s = 600      # F3: no I/O progress for 10 min
+intermittent_limit = 3    # 3 cycle failures ...
+intermittent_window = 10  # ... within 10 cycles end the drive's life
+device_reset = true       # recovery protocol restarts the USB device (needs administrator)
+check_size = "64MiB"      # recovery and post-test check: write, verify, delete 64 MiB of fresh data
+hub_event_drives = 3      # >= 3 drives of one hub missing at once = hub event (F5, not counted)
+
+[temperature]
+manual = true             # readings typed into the dashboard (IR thermometer, room thermometer)
+acpi = true               # best effort: the PC's ACPI thermal zone, every 10 min
+serial_port = ""          # e.g. "COM3" for the DS18B20 Arduino logger of run 1; empty = off
+
+[hubs]
+names = ["A", "B"]
+ports = 10
+model = "Sabrent HB-BU10 (10-port USB 3.0 hub, 12 V / 5 A adapter, per-port switches)"
+
+[[group]]
+id = "A16"
+brand = "ABLAZE"
+model = "16 GB metal USB 2.0 flash drive, 10-pack (Amazon B0CLR9B4MV)"
+capacity_gb = 16
+interface = "USB 2.0"
+lot = "run 2 lot, bought Nov 2026"
+units = ["A16-03", "A16-04", "A16-05", "A16-06", "A16-07",
+         "A16-08", "A16-09", "A16-10", "A16-11", "A16-12"]
+
+[[group]]
+id = "A8"
+brand = "ABLAZE"
+model = "8 GB metal USB 2.0 flash drive, 10-pack (Amazon B0CLR6CBKG)"
+capacity_gb = 8
+interface = "USB 2.0"
+lot = "run 2 lot, bought Nov 2026"
+units = ["A8-06", "A8-07", "A8-08", "A8-09", "A8-10",
+         "A8-11", "A8-12", "A8-13", "A8-14", "A8-15"]
+
+[[group]]
+id = "S8"
+brand = "SanDisk"
+model = "Cruzer Blade SDCZ50 8 GB (reused from run 1)"
+capacity_gb = 8
+interface = "USB 2.0"
+lot = "run 1 lot (2-pack, Oct 2026)"
+units = ["S8-01", "S8-02"]
+
+# Drives reused from run 1 enter run 2 with their earlier wear (delayed entry).
+# usb_serial lets the software confirm at intake that each stick is the run-1 unit.
+[prior."S8-01"]
+cycles = 26
+bytes_written = 174059228387
+usb_serial = "03025117013126112727"
+note = "run 1: 26 cycles, no failure, censored at the stop (Oct 24 20:00)"
+
+[prior."S8-02"]
+cycles = 23
+bytes_written = 153122687848
+usb_serial = "03024427013126113348"
+note = "run 1: 23 cycles, no failure, censored at the stop (Oct 24 20:00)"
+
+# ---------------------------------------------------------------------------------------
+# Randomized plan, seed 20261116 (tools/make_assignment.py). Do not edit by hand.
+# Each hub carries 5 A16 + 4 A8 + 1 S8; port order within a hub is random.
+[plan]
+spares = ["A8-09", "A8-15"]   # not tested: self-test before the start, port checks after it
+
+[[slot]]
+hub = "A"
+port = 1
+drive = "A16-10"
+
+[[slot]]
+hub = "A"
+port = 2
+drive = "A16-05"
+
+[[slot]]
+hub = "A"
+port = 3
+drive = "A16-12"
+
+[[slot]]
+hub = "A"
+port = 4
+drive = "A8-06"
+
+[[slot]]
+hub = "A"
+port = 5
+drive = "S8-01"
+
+[[slot]]
+hub = "A"
+port = 6
+drive = "A8-08"
+
+[[slot]]
+hub = "A"
+port = 7
+drive = "A8-10"
+
+[[slot]]
+hub = "A"
+port = 8
+drive = "A8-14"
+
+[[slot]]
+hub = "A"
+port = 9
+drive = "A16-04"
+
+[[slot]]
+hub = "A"
+port = 10
+drive = "A16-06"
+
+[[slot]]
+hub = "B"
+port = 1
+drive = "A16-09"
+
+[[slot]]
+hub = "B"
+port = 2
+drive = "A16-11"
+
+[[slot]]
+hub = "B"
+port = 3
+drive = "A8-11"
+
+[[slot]]
+hub = "B"
+port = 4
+drive = "A8-07"
+
+[[slot]]
+hub = "B"
+port = 5
+drive = "A8-13"
+
+[[slot]]
+hub = "B"
+port = 6
+drive = "S8-02"
+
+[[slot]]
+hub = "B"
+port = 7
+drive = "A16-07"
+
+[[slot]]
+hub = "B"
+port = 8
+drive = "A8-12"
+
+[[slot]]
+hub = "B"
+port = 9
+drive = "A16-03"
+
+[[slot]]
+hub = "B"
+port = 10
+drive = "A16-08"

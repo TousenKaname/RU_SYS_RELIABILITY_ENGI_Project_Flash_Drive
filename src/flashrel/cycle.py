@@ -1,92 +1,41 @@
-"""One copy-verify-delete cycle on one drive.
+"""One copy -> verify -> delete cycle on one drive (the same cycle as in run 1).
 
-A cycle has three timed phases:
+1. **write** (host -> drive): create every planned file and flush it to the drive;
+2. **verify** (drive -> host): read every file back around the host cache and compare it
+   byte for byte with the regenerated reference stream; a file that does not match is
+   read a second time (a match then is a transient mismatch, D3);
+3. **delete**: remove the files and folders, then check that the free space came back.
 
-1. **write** (host -> drive): create every planned file and flush it;
-2. **verify** (drive -> host): read every file back, bypassing the host cache,
-   and compare it byte for byte with the regenerated reference stream;
-3. **delete**: remove the cycle directory and check that the space came back.
-
-Errors are retried a few times. A retry that succeeds is logged as a
-*transient* error (a degradation indicator); one that keeps failing ends the
-cycle with an :class:`Outcome` that names the failure mode. A content mismatch
-is re-read once, which separates a transient read glitch from data that is
-really wrong on the flash.
+New in run 2: the stop time is checked between chunks and files in all three phases
+(run 1 did not check it in the delete phase); ``hooks.periodic`` runs the sentinel
+check every few minutes in every phase and can end the cycle at the moment a failure
+is found; every file operation is counted (``Dose``), so a failure carries the exact
+number of bytes and files the drive had seen when it was found.
 """
 
 from __future__ import annotations
 
+import math
 import os
-import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from functools import partial
-from pathlib import Path
-from statistics import median
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from flashrel.config import CycleSpec
-from flashrel.payload import PAYLOAD_DIR, CyclePlan, iter_expected
-from flashrel.system.directio import (
-    cache_bypass_supported,
-    device_reads,
-    evict_cache,
-    read_chunks,
-    sync_files,
-    write_file,
-)
-from flashrel.system.errors import ErrorKind, classify_os_error, describe
-from flashrel.system.volumes import VolumeUsage, is_read_only, usage
+from flashrel.errors import ErrorKind, classify, describe
+from flashrel.failure import CODES, Dose, Outcome
+from flashrel.payload import CHECK_DIR, PAYLOAD_DIR, CyclePlan, iter_expected
+from flashrel.platform.base import Platform
+from flashrel.timeutil import iso
 from flashrel.units import MiB, mb_per_s
 from flashrel.verify import FileCheck, FileStatus, verify_file
 
 T = TypeVar("T")
-
-#: The verify phase gives up after this many files that cannot be read at all.
 MAX_UNREADABLE_FILES = 3
-#: Free space that may stay allocated after the delete phase without suspicion.
 SPACE_LEAK_TOLERANCE = 16 * MiB
-
-
-class Outcome(str, Enum):
-    PASS = "pass"
-    CORRUPTION = "corruption"      # F1: data read back differs from data written
-    IO_ERROR = "io_error"          # F2: unrecoverable read or write error
-    DISCONNECTED = "disconnected"  # F3: drive vanished from the host
-    HANG = "hang"                  # F3: no I/O progress (watchdog)
-    READ_ONLY = "read_only"        # F4: drive refuses writes
-    FS_FAULT = "fs_fault"          # F6: file-system or capacity anomaly
-    ABORTED = "aborted"            # stopped by the operator; not a test result
-
-    @property
-    def is_failure(self) -> bool:
-        return self not in (Outcome.PASS, Outcome.ABORTED)
-
-
-_FATAL = {
-    ErrorKind.DISCONNECTED: Outcome.DISCONNECTED,
-    ErrorKind.READ_ONLY: Outcome.READ_ONLY,
-    ErrorKind.NO_SPACE: Outcome.FS_FAULT,
-}
-
-
-def _outcome_for(record: ErrorRecord) -> Outcome:
-    """Failure mode of an error that retries did not clear."""
-    return Outcome.FS_FAULT if record.kind is ErrorKind.FS_CORRUPT else Outcome.IO_ERROR
-
-
-@dataclass(frozen=True)
-class ErrorRecord:
-    phase: str
-    kind: ErrorKind
-    path: str
-    detail: str
-    attempts: int
-    recovered: bool
+HIST_EDGES = [10 ** (k / 4) for k in range(-16, 13)]  # 0.1 ms ... 1000 s, 4 bins per decade
 
 
 @dataclass
@@ -105,14 +54,34 @@ class PhaseStats:
     def mbps(self) -> float:
         return mb_per_s(self.bytes, self.seconds)
 
-    def latency(self, q: float) -> float:
-        """Per-file latency quantile in seconds (0 when the phase was empty)."""
+    @property
+    def fps(self) -> float:
+        return self.files / self.seconds if self.seconds > 0 else 0.0
+
+    def quantile(self, q: float) -> float:
         if not self.file_seconds:
             return 0.0
-        if q == 0.5:
-            return median(self.file_seconds)
         ordered = sorted(self.file_seconds)
-        return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+        return ordered[min(len(ordered) - 1, max(0, math.ceil(q * len(ordered)) - 1))]
+
+    def histogram(self) -> list[int]:
+        counts = [0] * (len(HIST_EDGES) + 1)
+        for s in self.file_seconds:
+            k = 0
+            while k < len(HIST_EDGES) and s >= HIST_EDGES[k]:
+                k += 1
+            counts[k] += 1
+        return counts
+
+
+@dataclass(frozen=True)
+class ErrorRecord:
+    phase: str
+    kind: str
+    path: str
+    detail: str
+    attempts: int
+    recovered: bool
 
 
 @dataclass
@@ -120,10 +89,9 @@ class CycleResult:
     drive_id: str
     cycle: int
     workload: str
-    host: str
-    port: str
-    started_at: datetime
-    ended_at: datetime | None = None
+    started_at: str
+    ended_at: str = ""
+    mount: str = ""
     planned_files: int = 0
     planned_bytes: int = 0
     free_before: int | None = None
@@ -137,8 +105,18 @@ class CycleResult:
     transient_mismatches: int = 0
     errors: list[ErrorRecord] = field(default_factory=list)
     outcome: Outcome = Outcome.PASS
+    phase: str = "setup"            # phase in which the cycle ended
+    sentinel: dict[str, Any] | None = None
+    sentinel_checks: int = 0
+    sentinel_warnings: int = 0
+    dose: Dose = field(default_factory=Dose)
     cache_bypassed: bool = True
-    verify_device_reads: int | None = None  # ru_inblock over the verify phase (POSIX)
+    t0: float = field(default_factory=time.monotonic)
+    duration_s: float = 0.0
+
+    @property
+    def code(self) -> str:
+        return CODES.get(self.outcome, "")
 
     @property
     def files_missing(self) -> int:
@@ -170,17 +148,14 @@ class CycleResult:
             return 0
         return max(0, self.free_before - self.free_after)
 
-    @property
-    def duration_s(self) -> float:
-        end = self.ended_at or datetime.now(timezone.utc)
-        return (end - self.started_at).total_seconds()
-
 
 class CycleAborted(Exception):
-    def __init__(self, outcome: Outcome, record: ErrorRecord | None = None) -> None:
+    def __init__(self, outcome: Outcome, record: ErrorRecord | None = None,
+                 sentinel: dict[str, Any] | None = None) -> None:
         super().__init__(outcome.value)
         self.outcome = outcome
         self.record = record
+        self.sentinel = sentinel
 
 
 class _FileFailed(Exception):
@@ -189,123 +164,148 @@ class _FileFailed(Exception):
         self.record = record
 
 
-Planner = Callable[[VolumeUsage], CyclePlan]
-FaultHook = Callable[[Path, CyclePlan], None]
+@dataclass
+class Hooks:
+    """Callbacks from the engine to the worker."""
+
+    should_stop: Callable[[], bool] = lambda: False
+    progress: Callable[[str, int, int], None] = lambda phase, files, nbytes: None
+    phase: Callable[[str, dict[str, Any]], None] = lambda name, info: None
+    periodic: Callable[[str], None] = lambda phase: None   # may raise CycleAborted
+    after_write: Callable[[str, CyclePlan], None] | None = None  # self-test fault injection
 
 
-def _ticking(chunks: Iterable[T], tick: Callable[[], None]) -> Iterator[T]:
-    """Pass chunks through, reporting progress before each (the hang watchdog)."""
-    for chunk in chunks:
-        tick()
-        yield chunk
+Planner = Callable[[int, int], CyclePlan]  # (free bytes, cluster size) -> plan
 
 
 class CycleRunner:
-    """Executes one cycle. Create a new runner for every cycle."""
+    """Executes one cycle. A new runner for every cycle."""
 
-    def __init__(self, mount: Path, planner: Planner, spec: CycleSpec, *, drive_id: str,
-                 cycle: int, workload: str, host: str = "", port: str = "",
-                 stop: threading.Event | None = None, fault_hook: FaultHook | None = None,
-                 progress: Callable[[], None] | None = None,
+    def __init__(self, platform: Platform, root: str, planner: Planner, spec: CycleSpec, *,
+                 drive_id: str, cycle: int, workload: str, hooks: Hooks | None = None,
+                 quarantined: set[str] | None = None, data_dir: str = PAYLOAD_DIR,
+                 clear_dirs: tuple[str, ...] = (PAYLOAD_DIR, CHECK_DIR),
                  sleep: Callable[[float], None] = time.sleep) -> None:
-        self.mount = mount
+        self.platform = platform
+        self.root = root
         self.planner = planner
         self.spec = spec
-        self.stop = stop
-        self.fault_hook = fault_hook
-        self.tick = progress or (lambda: None)
+        self.hooks = hooks or Hooks()
+        self.quarantined = set(quarantined or ())
+        self.data_dir = data_dir
+        self.clear_dirs = clear_dirs
         self.sleep = sleep
-        self.uncached = spec.readback == "uncached" and cache_bypass_supported()
-        self.evict = self.uncached and os.name != "nt"  # Windows reads unbuffered anyway
-        self.root = mount / PAYLOAD_DIR
-        self.result = CycleResult(drive_id=drive_id, cycle=cycle, workload=workload, host=host,
-                                  port=port, started_at=datetime.now(timezone.utc),
-                                  cache_bypassed=self.uncached)
+        self.result = CycleResult(drive_id=drive_id, cycle=cycle, workload=workload,
+                                  started_at=iso(), mount=root,
+                                  cache_bypassed=spec.readback == "uncached" and platform.cache_bypass())
 
-    # -- public ---------------------------------------------------------------------------
+    # -- public -----------------------------------------------------------------------------
     def run(self) -> CycleResult:
         res = self.result
         try:
+            self._phase("setup")
             self._clear_leftovers()
-            volume = self._attempt("setup", self.mount, partial(usage, self.mount))
-            res.free_before = volume.free
-            plan = self.planner(volume)
+            total, free, cluster = self._attempt("setup", self.root, lambda: self.platform.usage(self.root))
+            res.free_before = free
+            plan = self.planner(free, cluster)
             res.planned_files, res.planned_bytes = len(plan.files), plan.total_bytes
             if not plan.files:
-                self._abort("setup", ErrorKind.NO_SPACE, self.mount,
-                            f"only {volume.free} bytes free: nothing to write", Outcome.FS_FAULT)
-            cycle_dir = self.root / plan.dirname
+                self._abort("setup", ErrorKind.NO_SPACE, self.root,
+                            f"only {free} bytes free: nothing to write", Outcome.FS_FAULT)
+            cycle_dir = os.path.join(self.root, self.data_dir, plan.dirname)
+            self.hooks.periodic("setup")
             self._write_phase(plan, cycle_dir)
-            if self.fault_hook is not None:
-                self.fault_hook(cycle_dir, plan)
+            if self.hooks.after_write is not None:
+                self.hooks.after_write(cycle_dir, plan)
+            self.hooks.periodic("write-end")
             self._verify_phase(plan, cycle_dir)
+            self.hooks.periodic("verify-end")
             self._delete_phase(plan, cycle_dir)
-            res.free_after = self._attempt("delete", self.mount, partial(usage, self.mount)).free
+            res.free_after = self._attempt("delete", self.root, lambda: self.platform.usage(self.root))[1]
             if res.space_leak > SPACE_LEAK_TOLERANCE:
-                self._abort("delete", ErrorKind.FS_CORRUPT, self.mount,
-                            f"{res.space_leak} bytes not reclaimed after delete", Outcome.FS_FAULT)
+                self._abort("delete", ErrorKind.FS_CORRUPT, self.root,
+                            f"{res.space_leak} bytes not returned after the delete", Outcome.FS_FAULT)
+            self.hooks.periodic("delete-end")
         except CycleAborted as abort:
             res.outcome = abort.outcome
+            if abort.sentinel is not None:
+                res.sentinel = abort.sentinel
         except _FileFailed as failed:
-            res.outcome = _outcome_for(failed.record)
+            res.outcome = Outcome.FS_FAULT if failed.record.kind == ErrorKind.FS_CORRUPT.value else Outcome.IO_ERROR
             res.errors.append(failed.record)
         finally:
-            res.ended_at = datetime.now(timezone.utc)
-        # Corruption found in the read-back is the primary finding even when the
-        # delete phase fails afterwards; the delete error stays in ``errors``.
+            res.ended_at = iso()
+            res.duration_s = round(time.monotonic() - res.t0, 3)
+        # Corruption found in the read-back is the primary finding even if the delete
+        # phase then failed on the damaged folder (as on the 16 GB drives of run 1).
         if res.bad_files and res.outcome in (Outcome.PASS, Outcome.FS_FAULT):
             res.outcome = Outcome.CORRUPTION
         if res.outcome is Outcome.PASS and res.unreadable_files:
             res.outcome = Outcome.IO_ERROR
         return res
 
-    # -- phases ---------------------------------------------------------------------------
-    def _write_phase(self, plan: CyclePlan, cycle_dir: Path) -> None:
-        stats, per_file_sync = self.result.write, self.spec.fsync == "per_file"
-        made: set[Path] = set()
-        written: list[Path] = []
+    # -- phases -----------------------------------------------------------------------------
+    def _phase(self, name: str, **info: Any) -> None:
+        self.result.phase = name
+        self.hooks.phase(name, info)
+
+    def _write_phase(self, plan: CyclePlan, cycle_dir: str) -> None:
+        res, stats = self.result, self.result.write
+        self._phase("write", files_total=len(plan.files), bytes_total=plan.total_bytes)
+        made: set[str] = set()
         t_phase = time.perf_counter()
+        sync = self.spec.fsync == "per_file"
         for spec in plan.files:
             self._check_stop()
-            path = cycle_dir / spec.relpath
-            if path.parent not in made:
-                self._attempt("write", path.parent, partial(path.parent.mkdir, parents=True,
-                                                            exist_ok=True))
-                made.add(path.parent)
+            path = os.path.join(cycle_dir, *spec.relpath.split("/"))
+            parent = os.path.dirname(path)
+            if parent not in made:
+                self._attempt("write", parent, lambda p=parent: self.platform.make_dirs(p))
+                res.dose.dirs_created += 1
+                made.add(parent)
+
             def write_one(spec=spec, path=path) -> int:
-                # A fresh stream on every attempt, so a retry rewrites the whole file.
-                stream = _ticking(iter_expected(spec, plan.cycle, plan.chunk_size), self.tick)
-                return write_file(path, stream, sync=per_file_sync)
+                return self.platform.write_file(path, self._stream(spec, plan), sync=sync)
 
             t0 = time.perf_counter()
             self._attempt("write", path, write_one)
             stats.add(spec.size, time.perf_counter() - t0)
-            written.append(path)
-        if not per_file_sync:
-            self._attempt("write", cycle_dir, partial(sync_files, written))
+            res.dose.files_created += 1
+            res.dose.fsyncs += 1 if sync else 0
+            self.hooks.progress("write", 1, 0)
+            self.hooks.periodic("write")
         stats.seconds = time.perf_counter() - t_phase
-        if self.evict:  # outside the timed phase: drop cached pages before the read-back
-            for path in written:
-                try:
-                    evict_cache(path)
-                except OSError:
-                    # Not a drive failure: the read-back may hit the cache, which the
-                    # device-read measurement of the verify phase will show.
-                    self.result.cache_bypassed = False
 
-    def _verify_phase(self, plan: CyclePlan, cycle_dir: Path) -> None:
-        stats, res = self.result.verify, self.result
+    def _stream(self, spec, plan: CyclePlan) -> Iterator[bytes]:
+        """Expected chunks of a file; checks the stop flag and reports progress per chunk.
+        A retry draws a fresh stream, so a retried file is rewritten from the start."""
+        for chunk in iter_expected(spec, plan.cycle, plan.chunk_size):
+            self._check_stop()
+            yield chunk
+            self.result.dose.bytes_written += len(chunk)
+            self.hooks.progress("write", 0, len(chunk))
 
-        def reader(path: Path, chunk_size: int) -> Iterator[bytes]:
-            return _ticking(read_chunks(path, chunk_size, uncached=self.uncached), self.tick)
+    def _verify_phase(self, plan: CyclePlan, cycle_dir: str) -> None:
+        res, stats = self.result, self.result.verify
+        self._phase("verify", files_total=len(plan.files), bytes_total=plan.total_bytes)
+        uncached = self.result.cache_bypassed
 
-        reads_before = device_reads()
+        def reader(path: str, chunk_size: int) -> Iterator[bytes]:
+            for chunk in self.platform.read_chunks(path, chunk_size, uncached=uncached):
+                self._check_stop()
+                res.dose.bytes_read += len(chunk)
+                self.hooks.progress("verify", 0, len(chunk))
+                yield chunk
+
         t_phase = time.perf_counter()
         for spec in plan.files:
             self._check_stop()
-            path = cycle_dir / spec.relpath
-            check_once = partial(verify_file, path, spec, cycle=plan.cycle,
-                                 chunk_size=plan.chunk_size, read_chunks=reader)
+            path = os.path.join(cycle_dir, *spec.relpath.split("/"))
+
+            def check_once(path=path, spec=spec) -> FileCheck:
+                return verify_file(path, spec, cycle=plan.cycle, chunk_size=plan.chunk_size,
+                                   read_chunks=reader)
+
             t0 = time.perf_counter()
             try:
                 check = self._attempt("verify", path, check_once)
@@ -320,121 +320,144 @@ class CycleRunner:
                 if res.unreadable_files >= MAX_UNREADABLE_FILES:
                     raise CycleAborted(Outcome.IO_ERROR, failed.record) from None
                 continue
-            if check.status is FileStatus.MISSING and not self.mount.exists():
+            if check.status is FileStatus.MISSING and not self.platform.present(self.root):
                 self._abort("verify", ErrorKind.DISCONNECTED, path,
-                            "volume disappeared during verification", Outcome.DISCONNECTED)
+                            "volume disappeared during the read-back", Outcome.DISCONNECTED)
             stats.add(check.observed_size or 0, time.perf_counter() - t0)
             if check.status is not FileStatus.OK:
                 res.bad_files.append(check)
+            self.hooks.progress("verify", 1, 0)
+            self.hooks.periodic("verify")
         stats.seconds = time.perf_counter() - t_phase
-        reads_after = device_reads()
-        if reads_before is not None and reads_after is not None:
-            # Measured, not assumed: a read-back that reached the drive raises ru_inblock.
-            res.verify_device_reads = reads_after - reads_before
-            res.cache_bypassed = self.uncached and (res.verify_device_reads > 0
-                                                    or stats.bytes == 0)
 
-    def _delete_phase(self, plan: CyclePlan, cycle_dir: Path) -> None:
-        stats = self.result.delete
-        t0 = time.perf_counter()
+    def _delete_phase(self, plan: CyclePlan, cycle_dir: str) -> None:
+        res, stats = self.result, self.result.delete
+        self._phase("delete", files_total=len(plan.files), bytes_total=plan.total_bytes)
+        missing = {c.relpath for c in res.bad_files if c.status is FileStatus.MISSING}
+        by_dir: dict[str, list] = {}
+        for spec in plan.files:
+            by_dir.setdefault(spec.relpath.rsplit("/", 1)[0], []).append(spec)
+        t_phase = time.perf_counter()
+        for dirname, specs in by_dir.items():
+            for spec in specs:
+                self._check_stop()
+                if spec.relpath in missing:
+                    continue
+                path = os.path.join(cycle_dir, *spec.relpath.split("/"))
+                t0 = time.perf_counter()
+                self._attempt("delete", path, lambda p=path: self._remove_if_present(p))
+                stats.add(spec.size, time.perf_counter() - t0)
+                res.dose.files_deleted += 1
+                self.hooks.progress("delete", 1, 0)
+                self.hooks.periodic("delete")
+            self._remove_dir(os.path.join(cycle_dir, *dirname.split("/")))
+        self._remove_dir(cycle_dir)
+        stats.seconds = time.perf_counter() - t_phase
+
+    def _remove_if_present(self, path: str) -> None:
         try:
-            self._attempt("delete", cycle_dir, partial(_remove_tree, cycle_dir, self.tick))
+            self.platform.remove_file(path)
+        except FileNotFoundError:
+            if not self.platform.present(self.root):
+                raise OSError(0, "volume disappeared", path, 1167) from None
+
+    def _remove_dir(self, path: str) -> None:
+        def rm() -> None:
+            try:
+                self.platform.remove_dir(path)
+            except FileNotFoundError:
+                if not self.platform.present(self.root):
+                    raise OSError(0, "volume disappeared", path, 1167) from None
+        try:
+            self._attempt("delete", path, rm)
         except _FileFailed as failed:
-            self.result.errors.append(failed.record)
             raise CycleAborted(Outcome.FS_FAULT, failed.record) from None
-        stats.files, stats.bytes = len(plan.files), plan.total_bytes
-        stats.seconds = time.perf_counter() - t0
+        self.result.dose.dirs_deleted += 1
 
-    # -- helpers --------------------------------------------------------------------------
+    # -- helpers ----------------------------------------------------------------------------
     def _clear_leftovers(self) -> None:
-        """Remove directories left by an interrupted cycle."""
-        def listing() -> list[Path]:
-            if not self.root.exists():
-                return []
-            return [p for p in self.root.iterdir() if p.is_dir()]
+        """Remove what an interrupted or failed cycle left behind (never a quarantined folder)."""
+        for top in self.clear_dirs:
+            base = os.path.join(self.root, top)
+            names = self._attempt("setup", base, lambda b=base: sorted(os.listdir(b)) if os.path.isdir(b) else [])
+            for name in names:
+                rel = f"{top}/{name}"
+                if rel in self.quarantined:
+                    continue
+                self.result.leftover_dirs += 1
+                self._remove_tree(os.path.join(base, name))
 
-        leftovers = self._attempt("setup", self.root, listing)
-        self.result.leftover_dirs = len(leftovers)
-        for path in leftovers:
-            self._attempt("setup", path, partial(_remove_tree, path, self.tick))
+    def _remove_tree(self, path: str) -> None:
+        if os.path.isfile(path):
+            self._attempt("setup", path, lambda: self.platform.remove_file(path))
+            self.result.dose.files_deleted += 1
+            return
+        for base, dirs, files in os.walk(path, topdown=False):
+            for name in files:
+                self._check_stop()
+                full = os.path.join(base, name)
+                self._attempt("setup", full, lambda f=full: self._remove_if_present(f))
+                self.result.dose.files_deleted += 1
+                self.hooks.progress("setup", 1, 0)
+            for name in dirs:
+                full = os.path.join(base, name)
+                self._attempt("setup", full, lambda d=full: self.platform.remove_dir(d))
+                self.result.dose.dirs_deleted += 1
+        self._attempt("setup", path, lambda: self.platform.remove_dir(path))
+        self.result.dose.dirs_deleted += 1
 
     def _check_stop(self) -> None:
-        if self.stop is not None and self.stop.is_set():
+        if self.hooks.should_stop():
             raise CycleAborted(Outcome.ABORTED)
 
-    def _abort(self, phase: str, kind: ErrorKind, path: Path, detail: str,
-               outcome: Outcome) -> None:
-        record = ErrorRecord(phase, kind, self._rel(path), detail, attempts=1, recovered=False)
+    def _abort(self, phase: str, kind: ErrorKind, path: str, detail: str, outcome: Outcome) -> None:
+        record = ErrorRecord(phase, kind.value, self._rel(path), detail, 1, False)
         self.result.errors.append(record)
         raise CycleAborted(outcome, record)
 
-    def _rel(self, path: Path) -> str:
+    def _rel(self, path: str) -> str:
         try:
-            return path.relative_to(self.mount).as_posix()
+            return os.path.relpath(path, self.root).replace(os.sep, "/")
         except ValueError:
-            return str(path)
+            return path
 
     def _refine(self, kind: ErrorKind, phase: str) -> ErrorKind:
-        """Use the volume's state to sharpen an ambiguous error code."""
-        if not self.mount.exists():
+        """Sharpen an ambiguous error from the state of the volume."""
+        if not self.platform.present(self.root):
             return ErrorKind.DISCONNECTED
-        if phase in ("write", "delete") and kind in (ErrorKind.IO_ERROR, ErrorKind.OTHER):
+        if phase in ("write", "delete", "setup") and kind in (ErrorKind.IO_ERROR, ErrorKind.OTHER):
             try:
-                if is_read_only(self.mount):
+                if self.platform.is_read_only(self.root):
                     return ErrorKind.READ_ONLY
             except OSError:
                 return ErrorKind.DISCONNECTED
         return kind
 
-    def _attempt(self, phase: str, path: Path, action: Callable[[], T]) -> T:
-        """Run ``action``, retrying OS errors with a linear back-off.
+    def _attempt(self, phase: str, path: str, action: Callable[[], T]) -> T:
+        """Run ``action``, retrying OS errors with a linear back-off (5 s, 10 s).
 
-        Disconnects, read-only locks and a full volume end the cycle at once.
-        Other errors are retried; a retry that succeeds is logged as a transient
-        error, and one that never succeeds raises :class:`_FileFailed`.
+        A disconnect, a read-only lock or a full volume ends the cycle at once. A retry
+        that succeeds is logged as a transient error (D3).
         """
         attempts = self.spec.retries + 1
         last: ErrorRecord | None = None
+        fatal = {ErrorKind.DISCONNECTED: Outcome.DISCONNECTED, ErrorKind.READ_ONLY: Outcome.READ_ONLY,
+                 ErrorKind.NO_SPACE: Outcome.FS_FAULT}
         for attempt in range(1, attempts + 1):
             try:
                 value = action()
             except OSError as exc:
-                kind = self._refine(classify_os_error(exc), phase)
-                last = ErrorRecord(phase, kind, self._rel(path), describe(exc), attempt,
-                                   recovered=False)
-                if kind in _FATAL:
+                kind = self._refine(classify(exc), phase)
+                last = ErrorRecord(phase, kind.value, self._rel(path), describe(exc), attempt, False)
+                if kind in fatal:
                     self.result.errors.append(last)
-                    raise CycleAborted(_FATAL[kind], last) from None
+                    raise CycleAborted(fatal[kind], last) from None
                 if attempt == attempts:
                     raise _FileFailed(last) from None
                 self.sleep(self.spec.retry_backoff_s * attempt)
                 continue
             if last is not None:
                 self.result.errors.append(ErrorRecord(phase, last.kind, last.path, last.detail,
-                                                      attempt, recovered=True))
+                                                      attempt, True))
             return value
         raise AssertionError("unreachable")
-
-
-def _remove_tree(path: Path, tick: Callable[[], None] = lambda: None) -> None:
-    """Delete a directory tree file by file (each removal counts as progress)."""
-    if path.exists():
-        for root, dirs, files in os.walk(path, topdown=False):
-            for name in files:
-                os.remove(os.path.join(root, name))
-                tick()
-            for name in dirs:
-                os.rmdir(os.path.join(root, name))
-        os.rmdir(path)
-    if path.exists():
-        raise OSError(f"{path} still exists after delete")
-
-
-def run_cycle(mount: Path, planner: Planner, spec: CycleSpec, *, drive_id: str, cycle: int,
-              workload: str, host: str = "", port: str = "",
-              stop: threading.Event | None = None, fault_hook: FaultHook | None = None,
-              progress: Callable[[], None] | None = None) -> CycleResult:
-    """Convenience wrapper around :class:`CycleRunner`."""
-    return CycleRunner(mount, planner, spec, drive_id=drive_id, cycle=cycle, workload=workload,
-                       host=host, port=port, stop=stop, fault_hook=fault_hook,
-                       progress=progress).run()

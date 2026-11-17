@@ -1,0 +1,704 @@
+{
+  "captured_at": "2026-10-25T00:09:24+00:00",
+  "note": "read-only raw reads; nothing was written to any drive",
+  "drives": {
+    "S8-01": {
+      "letter": "F",
+      "status": "censored",
+      "cluster_size": 32768,
+      "cluster_count": 244159,
+      "root_cluster": 4,
+      "heap_offset": 2097152,
+      "root_parses": true,
+      "identity": {
+        "bytes": 174,
+        "read": 174,
+        "bad_bytes": 0,
+        "wrong_bits": 0,
+        "one_to_zero": 0,
+        "zero_to_one": 0
+      },
+      "dirs": {},
+      "first_clusters": [
+        {
+          "cluster": 2,
+          "role": "allocation bitmap",
+          "known_bits": 17984,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 3,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 4,
+          "role": "root directory",
+          "known_bits": 258560,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 5,
+          "role": "Windows folder",
+          "known_bits": 260352,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 6,
+          "role": "Windows file",
+          "known_bits": 261888,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261376,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 8,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 9,
+          "role": "FLASHREL-DATA",
+          "known_bits": 240640,
+          "wrong_bits": 0
+        }
+      ],
+      "first_clusters_flip": 0.0
+    },
+    "A16-01": {
+      "letter": "H",
+      "status": "attention",
+      "cluster_size": 32768,
+      "cluster_count": 479903,
+      "root_cluster": 5,
+      "heap_offset": 3145728,
+      "root_parses": true,
+      "identity": {
+        "bytes": 176,
+        "read": 176,
+        "bad_bytes": 0,
+        "wrong_bits": 0,
+        "one_to_zero": 0,
+        "zero_to_one": 0
+      },
+      "dirs": {
+        "FLASHREL-DATA/c000009/d0342": {
+          "cluster": 649,
+          "runs": [
+            {
+              "start": 0,
+              "end": 8160,
+              "kind": "deleted",
+              "first": "f087552.bin",
+              "last": "f087636.bin"
+            },
+            {
+              "start": 8160,
+              "end": 8192,
+              "kind": "in use",
+              "first": "",
+              "last": ""
+            },
+            {
+              "start": 8192,
+              "end": 20480,
+              "kind": "random",
+              "first": "",
+              "last": ""
+            },
+            {
+              "start": 20480,
+              "end": 20544,
+              "kind": "in use",
+              "first": "",
+              "last": ""
+            },
+            {
+              "start": 20544,
+              "end": 24576,
+              "kind": "deleted",
+              "first": "f087766.bin",
+              "last": "f087807.bin"
+            },
+            {
+              "start": 24576,
+              "end": 32768,
+              "kind": "unused",
+              "first": "",
+              "last": ""
+            }
+          ]
+        }
+      },
+      "stale_data": {
+        "first_cluster": 11,
+        "clusters": 4096,
+        "chunks": 1643,
+        "bytes_checked": 104043799,
+        "wrong_bits": 0,
+        "chunks_with_errors": 0,
+        "headers_of_unknown_files": 0,
+        "clusters_not_covered": 8
+      },
+      "first_clusters": [
+        {
+          "cluster": 3,
+          "role": "allocation bitmap",
+          "known_bits": 44384,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 4,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 5,
+          "role": "root directory",
+          "known_bits": 258560,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 6,
+          "role": "Windows folder",
+          "known_bits": 260352,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261888,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 8,
+          "role": "Windows file",
+          "known_bits": 261376,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 9,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 10,
+          "role": "FLASHREL-DATA",
+          "known_bits": 255232,
+          "wrong_bits": 0
+        }
+      ],
+      "first_clusters_flip": 0.0
+    },
+    "A8-01": {
+      "letter": "L",
+      "status": "censored",
+      "cluster_size": 32768,
+      "cluster_count": 245695,
+      "root_cluster": 4,
+      "heap_offset": 2097152,
+      "root_parses": true,
+      "identity": {
+        "bytes": 174,
+        "read": 174,
+        "bad_bytes": 0,
+        "wrong_bits": 0,
+        "one_to_zero": 0,
+        "zero_to_one": 0
+      },
+      "dirs": {},
+      "first_clusters": [
+        {
+          "cluster": 2,
+          "role": "allocation bitmap",
+          "known_bits": 16448,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 3,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 4,
+          "role": "root directory",
+          "known_bits": 258560,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 5,
+          "role": "Windows folder",
+          "known_bits": 260352,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 6,
+          "role": "Windows file",
+          "known_bits": 261888,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261376,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 8,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 9,
+          "role": "FLASHREL-DATA",
+          "known_bits": 248728,
+          "wrong_bits": 0
+        }
+      ],
+      "first_clusters_flip": 0.0
+    },
+    "A8-02": {
+      "letter": "J",
+      "status": "attention",
+      "cluster_size": 32768,
+      "cluster_count": 245695,
+      "root_cluster": 4,
+      "heap_offset": 2097152,
+      "root_parses": false,
+      "identity": {
+        "bytes": 174,
+        "read": 174,
+        "bad_bytes": 124,
+        "wrong_bits": 212,
+        "one_to_zero": 92,
+        "zero_to_one": 120
+      },
+      "dirs": {},
+      "stale_data": {
+        "first_cluster": 10,
+        "clusters": 4096,
+        "chunks": 1618,
+        "bytes_checked": 103318902,
+        "wrong_bits": 0,
+        "chunks_with_errors": 0,
+        "headers_of_unknown_files": 0,
+        "clusters_not_covered": 68
+      },
+      "first_clusters": [
+        {
+          "cluster": 2,
+          "role": "allocation bitmap",
+          "known_bits": 16448,
+          "wrong_bits": 4507
+        },
+        {
+          "cluster": 3,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 41100
+        },
+        {
+          "cluster": 4,
+          "role": "root directory",
+          "known_bits": 260808,
+          "wrong_bits": 34444
+        },
+        {
+          "cluster": 5,
+          "role": "Windows folder",
+          "known_bits": 261408,
+          "wrong_bits": 36070
+        },
+        {
+          "cluster": 6,
+          "role": "Windows file",
+          "known_bits": 262072,
+          "wrong_bits": 36218
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261840,
+          "wrong_bits": 36475
+        },
+        {
+          "cluster": 8,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 36243
+        },
+        {
+          "cluster": 9,
+          "role": "FLASHREL-DATA",
+          "known_bits": 253208,
+          "wrong_bits": 34592
+        }
+      ],
+      "first_clusters_flip": 0.14110806533657377
+    },
+    "A8-03": {
+      "letter": "I",
+      "status": "attention",
+      "cluster_size": 32768,
+      "cluster_count": 245695,
+      "root_cluster": 4,
+      "heap_offset": 2097152,
+      "root_parses": false,
+      "identity": {
+        "bytes": 174,
+        "read": 174,
+        "bad_bytes": 94,
+        "wrong_bits": 128,
+        "one_to_zero": 56,
+        "zero_to_one": 72
+      },
+      "dirs": {},
+      "stale_data": {
+        "first_cluster": 10,
+        "clusters": 4096,
+        "chunks": 1649,
+        "bytes_checked": 102632939,
+        "wrong_bits": 0,
+        "chunks_with_errors": 0,
+        "headers_of_unknown_files": 0,
+        "clusters_not_covered": 64
+      },
+      "first_clusters": [
+        {
+          "cluster": 2,
+          "role": "allocation bitmap",
+          "known_bits": 16448,
+          "wrong_bits": 1986
+        },
+        {
+          "cluster": 3,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 24559
+        },
+        {
+          "cluster": 4,
+          "role": "root directory",
+          "known_bits": 260808,
+          "wrong_bits": 27714
+        },
+        {
+          "cluster": 5,
+          "role": "Windows folder",
+          "known_bits": 261408,
+          "wrong_bits": 25520
+        },
+        {
+          "cluster": 6,
+          "role": "Windows file",
+          "known_bits": 262072,
+          "wrong_bits": 27607
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261840,
+          "wrong_bits": 24550
+        },
+        {
+          "cluster": 8,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 27874
+        },
+        {
+          "cluster": 9,
+          "role": "FLASHREL-DATA",
+          "known_bits": 253208,
+          "wrong_bits": 23716
+        }
+      ],
+      "first_clusters_flip": 0.0997384884939285
+    },
+    "A8-04": {
+      "letter": "K",
+      "status": "attention",
+      "cluster_size": 32768,
+      "cluster_count": 245695,
+      "root_cluster": 4,
+      "heap_offset": 2097152,
+      "root_parses": false,
+      "identity": {
+        "bytes": 174,
+        "read": 174,
+        "bad_bytes": 120,
+        "wrong_bits": 189,
+        "one_to_zero": 78,
+        "zero_to_one": 111
+      },
+      "dirs": {},
+      "stale_data": {
+        "first_cluster": 10,
+        "clusters": 4096,
+        "chunks": 1617,
+        "bytes_checked": 103052410,
+        "wrong_bits": 0,
+        "chunks_with_errors": 0,
+        "headers_of_unknown_files": 0,
+        "clusters_not_covered": 64
+      },
+      "first_clusters": [
+        {
+          "cluster": 2,
+          "role": "allocation bitmap",
+          "known_bits": 16448,
+          "wrong_bits": 2506
+        },
+        {
+          "cluster": 3,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 40497
+        },
+        {
+          "cluster": 4,
+          "role": "root directory",
+          "known_bits": 260808,
+          "wrong_bits": 41316
+        },
+        {
+          "cluster": 5,
+          "role": "Windows folder",
+          "known_bits": 261408,
+          "wrong_bits": 40410
+        },
+        {
+          "cluster": 6,
+          "role": "Windows file",
+          "known_bits": 262072,
+          "wrong_bits": 40727
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261840,
+          "wrong_bits": 39629
+        },
+        {
+          "cluster": 8,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 40995
+        },
+        {
+          "cluster": 9,
+          "role": "FLASHREL-DATA",
+          "known_bits": 253208,
+          "wrong_bits": 39930
+        }
+      ],
+      "first_clusters_flip": 0.15543413518601445
+    },
+    "S8-02": {
+      "letter": "E",
+      "status": "censored",
+      "cluster_size": 32768,
+      "cluster_count": 244159,
+      "root_cluster": 4,
+      "heap_offset": 2097152,
+      "root_parses": true,
+      "identity": {
+        "bytes": 174,
+        "read": 174,
+        "bad_bytes": 0,
+        "wrong_bits": 0,
+        "one_to_zero": 0,
+        "zero_to_one": 0
+      },
+      "dirs": {},
+      "first_clusters": [
+        {
+          "cluster": 2,
+          "role": "allocation bitmap",
+          "known_bits": 17984,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 3,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 4,
+          "role": "root directory",
+          "known_bits": 258560,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 5,
+          "role": "Windows folder",
+          "known_bits": 260352,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 6,
+          "role": "Windows file",
+          "known_bits": 261888,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261376,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 8,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 9,
+          "role": "FLASHREL-DATA",
+          "known_bits": 242472,
+          "wrong_bits": 0
+        }
+      ],
+      "first_clusters_flip": 0.0
+    },
+    "A16-02": {
+      "letter": "D",
+      "status": "attention",
+      "cluster_size": 32768,
+      "cluster_count": 479903,
+      "root_cluster": 5,
+      "heap_offset": 3145728,
+      "root_parses": true,
+      "identity": {
+        "bytes": 176,
+        "read": 176,
+        "bad_bytes": 0,
+        "wrong_bits": 0,
+        "one_to_zero": 0,
+        "zero_to_one": 0
+      },
+      "dirs": {
+        "FLASHREL-DATA/c000006/d0116": {
+          "cluster": 6999,
+          "runs": [
+            {
+              "start": 0,
+              "end": 8160,
+              "kind": "deleted",
+              "first": "f029696.bin",
+              "last": "f029780.bin"
+            },
+            {
+              "start": 8160,
+              "end": 8192,
+              "kind": "in use",
+              "first": "",
+              "last": ""
+            },
+            {
+              "start": 8192,
+              "end": 16384,
+              "kind": "random",
+              "first": "",
+              "last": ""
+            },
+            {
+              "start": 16384,
+              "end": 18048,
+              "kind": "in use",
+              "first": "",
+              "last": "f029883.bin"
+            },
+            {
+              "start": 18048,
+              "end": 24576,
+              "kind": "deleted",
+              "first": "f029884.bin",
+              "last": "f029951.bin"
+            },
+            {
+              "start": 24576,
+              "end": 32768,
+              "kind": "unused",
+              "first": "",
+              "last": ""
+            }
+          ]
+        }
+      },
+      "stale_data": {
+        "first_cluster": 11,
+        "clusters": 4096,
+        "chunks": 1683,
+        "bytes_checked": 103415906,
+        "wrong_bits": 0,
+        "chunks_with_errors": 0,
+        "headers_of_unknown_files": 0,
+        "clusters_not_covered": 7
+      },
+      "first_clusters": [
+        {
+          "cluster": 3,
+          "role": "allocation bitmap",
+          "known_bits": 44384,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 4,
+          "role": "up-case table",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 5,
+          "role": "root directory",
+          "known_bits": 258560,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 6,
+          "role": "Windows folder",
+          "known_bits": 260352,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 7,
+          "role": "Windows file",
+          "known_bits": 261888,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 8,
+          "role": "Windows file",
+          "known_bits": 261376,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 9,
+          "role": "identity file",
+          "known_bits": 262144,
+          "wrong_bits": 0
+        },
+        {
+          "cluster": 10,
+          "role": "FLASHREL-DATA",
+          "known_bits": 256592,
+          "wrong_bits": 0
+        }
+      ],
+      "first_clusters_flip": 0.0
+    }
+  }
+}

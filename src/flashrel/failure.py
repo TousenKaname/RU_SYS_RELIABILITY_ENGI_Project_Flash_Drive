@@ -1,175 +1,146 @@
-"""Failure and degradation taxonomy, and the rules that turn cycles into events.
+"""Failure and degradation taxonomy, drive state, and the rules that turn cycles into events.
 
 Failure modes (a cycle that ends in one of these is a *cycle failure*)::
 
-    F1  data corruption       bytes read back differ from the bytes written
+    F1  data corruption       bytes read back differ from the bytes written (also a file at
+                              rest: the identity or sentinel file), or files are missing
     F2  I/O error             a read or write error that retries do not clear
-    F3  disconnection         the drive vanishes from the host or does not enumerate
+    F3  disconnect or hang    the drive leaves the bus, or makes no I/O progress for 10 min
     F4  read-only lock        the drive refuses writes (typical end-of-life behaviour)
-    F5  port or host fault    the failure is traced to the hub, port or computer
-    F6  file-system fault     volume damage, space not reclaimed, capacity change
+    F5  port or hub fault     traced to the hub, the port or the computer; NOT counted
+    F6  file-system fault     damaged file-system records, space not returned, capacity change
 
 Degradation indicators (the drive still works)::
 
-    D1  slowdown              write throughput below a fraction of its own baseline
-    D2  intermittent failure  a cycle failure that clears after the recovery protocol
-    D3  transient error       an error or mismatch that clears on retry within a cycle
+    D1  slowdown              write throughput below 50 % of the drive's own baseline
+    D2  intermittent failure  a cycle failure after which the drive passes the recovery check
+    D3  transient error       an error or mismatch that a retry within the cycle clears
 
-A drive-attributed failure is *soft* when the drive passes the recovery check
-afterwards (it is logged as D2 and the drive keeps cycling) and *hard* when it
-does not, or when soft failures recur too often. The cycle of the hard failure
-is the drive's failure time T; drives still running at the end are censored.
+Life data: ``first_failure`` is the first cycle failure (T); ``end_of_life`` is when the
+drive is retired (it fails the recovery check, locks read-only, loses its identity, or
+has 3 cycle failures within 10 cycles). Drives still working at the stop are censored.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from statistics import median
 from typing import Any
 
 from flashrel.config import FailurePolicy
-from flashrel.cycle import CycleResult, Outcome
-
-FAILURE_CODES: dict[Outcome, str] = {
-    Outcome.CORRUPTION: "F1",
-    Outcome.IO_ERROR: "F2",
-    Outcome.DISCONNECTED: "F3",
-    Outcome.HANG: "F3",
-    Outcome.READ_ONLY: "F4",
-    Outcome.FS_FAULT: "F6",
-}
-PORT_FAULT_CODE = "F5"
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+class Outcome(str, Enum):
+    PASS = "pass"
+    CORRUPTION = "corruption"      # F1
+    IO_ERROR = "io_error"          # F2
+    DISCONNECTED = "disconnected"  # F3
+    HANG = "hang"                  # F3
+    READ_ONLY = "read_only"        # F4
+    HUB_FAULT = "hub_fault"        # F5 (not counted)
+    FS_FAULT = "fs_fault"          # F6
+    ABORTED = "aborted"            # stopped (stop time, operator, controller); not counted
+    INTERRUPTED = "interrupted"    # the worker or host died mid-cycle; not counted
+
+    @property
+    def is_failure(self) -> bool:
+        return self not in (Outcome.PASS, Outcome.ABORTED, Outcome.INTERRUPTED, Outcome.HUB_FAULT)
 
 
-class EventType(str, Enum):
-    CYCLE_FAILURE = "cycle_failure"  # a cycle ended in F1-F4 or F6
-    RECOVERED = "recovered"          # the drive passed the recovery check: soft failure (D2)
-    ATTENTION = "attention"          # automatic recovery failed; an operator must act
-    PORT_FAULT = "port_fault"        # an earlier cycle failure re-attributed to the port (F5)
-    HARD_FAILURE = "hard_failure"    # end of life; the drive is retired
-    TRANSIENT = "transient"          # D3
-    SLOW = "slow"                    # D1
-    CENSORED = "censored"            # stop rule reached while the drive still works
-    NOTE = "note"                    # operator note (port move, re-plug, observation)
+CODES = {Outcome.CORRUPTION: "F1", Outcome.IO_ERROR: "F2", Outcome.DISCONNECTED: "F3",
+         Outcome.HANG: "F3", Outcome.READ_ONLY: "F4", Outcome.HUB_FAULT: "F5",
+         Outcome.FS_FAULT: "F6"}
+FROM_CODE = {"F1": Outcome.CORRUPTION, "F2": Outcome.IO_ERROR, "F3": Outcome.DISCONNECTED,
+             "F4": Outcome.READ_ONLY, "F5": Outcome.HUB_FAULT, "F6": Outcome.FS_FAULT}
 
 
-class DriveStatus(str, Enum):
-    ACTIVE = "active"
-    ATTENTION = "attention"
-    FAILED = "failed"
-    CENSORED = "censored"
+class Status(str, Enum):
+    ENROLLED = "enrolled"      # intake done, test not started
+    ACTIVE = "active"          # cycling
+    RECOVERING = "recovering"  # running the recovery protocol after a cycle failure
+    PAUSED = "paused"          # waiting out a hub event (F5)
+    ATTENTION = "attention"    # automatic recovery failed; decided by the post-test protocol
+    FAILED = "failed"          # end of life (retired)
+    CENSORED = "censored"      # still working at the stop time
 
 
-@dataclass(frozen=True)
-class Event:
-    drive_id: str
-    cycle: int
-    type: EventType
-    code: str = ""
-    detail: dict[str, Any] = field(default_factory=dict)
-    time: str = field(default_factory=utc_now)
+FINAL = {Status.ATTENTION.value, Status.FAILED.value, Status.CENSORED.value}
 
-    def to_json(self) -> dict[str, Any]:
-        record = asdict(self)
-        record["type"] = self.type.value
-        return record
+
+@dataclass
+class Dose:
+    """What a drive has been put through (the possible time scales of its life)."""
+
+    bytes_written: int = 0
+    bytes_read: int = 0
+    files_created: int = 0
+    files_deleted: int = 0
+    dirs_created: int = 0
+    dirs_deleted: int = 0
+    fsyncs: int = 0
+
+    def add(self, other: Dose) -> None:
+        for f in fields(self):
+            setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
+
+    def copy(self) -> Dose:
+        return Dose(**asdict(self))
+
+    @property
+    def file_ops(self) -> int:
+        return self.files_created + self.files_deleted
+
+    def to_json(self) -> dict[str, int]:
+        return asdict(self)
 
     @classmethod
-    def from_json(cls, record: dict[str, Any]) -> Event:
-        return cls(drive_id=record["drive_id"], cycle=int(record["cycle"]),
-                   type=EventType(record["type"]), code=record.get("code", ""),
-                   detail=record.get("detail") or {}, time=record["time"])
+    def from_json(cls, d: dict[str, Any] | None) -> Dose:
+        d = d or {}
+        return cls(**{f.name: int(d.get(f.name, 0) or 0) for f in fields(cls)})
 
 
 @dataclass
 class DriveState:
-    """Everything a worker needs to resume a drive after a restart."""
-
     drive_id: str
-    status: DriveStatus = DriveStatus.ACTIVE
+    status: str = Status.ACTIVE.value
     cycles_done: int = 0
-    bytes_written: int = 0
-    soft_failures: list[int] = field(default_factory=list)
+    in_progress: dict[str, Any] | None = None
+    cum: Dose = field(default_factory=Dose)
+    failure_cycles: list[int] = field(default_factory=list)
+    first_failure: dict[str, Any] | None = None
+    end_of_life: dict[str, Any] | None = None
     baseline_mbps: dict[str, float] = field(default_factory=dict)
     baseline_samples: dict[str, list[float]] = field(default_factory=dict)
     recent_mbps: dict[str, list[float]] = field(default_factory=dict)
     slow_flagged: list[str] = field(default_factory=list)
-    host: str = ""
-    port: str = ""
+    quarantined: list[str] = field(default_factory=list)
+    sentinel_skip: list[str] = field(default_factory=list)  # damage already on record
+    pending_recovery: dict[str, Any] | None = None  # a recovery protocol still to finish
+    recoveries: int = 0
+    transients: int = 0
+    started_at: str | None = None
+    censored_at: str | None = None
+    last_outcome: str = ""
+    last_mbps: dict[str, dict[str, float]] = field(default_factory=dict)
     updated_at: str = ""
 
-    @property
-    def next_cycle(self) -> int:
-        return self.cycles_done + 1
-
     def to_json(self) -> dict[str, Any]:
-        record = asdict(self)
-        record["status"] = self.status.value
-        return record
+        d = asdict(self)
+        d["cum"] = self.cum.to_json()
+        return d
 
     @classmethod
-    def from_json(cls, record: dict[str, Any]) -> DriveState:
-        record = dict(record)
-        record["status"] = DriveStatus(record.get("status", "active"))
-        known = cls.__dataclass_fields__
-        return cls(**{k: v for k, v in record.items() if k in known})
+    def from_json(cls, d: dict[str, Any]) -> DriveState:
+        known = {f.name for f in fields(cls)}
+        data = {k: v for k, v in d.items() if k in known}
+        data["cum"] = Dose.from_json(d.get("cum"))
+        return cls(**data)
 
 
-def failure_detail(result: CycleResult, limit: int = 20) -> dict[str, Any]:
-    """Compact description of a failed cycle for the event log."""
-    return {
-        "outcome": result.outcome.value,
-        "workload": result.workload,
-        "host": result.host,
-        "port": result.port,
-        "errors": [{"phase": e.phase, "kind": e.kind.value, "path": e.path, "detail": e.detail}
-                   for e in result.errors if not e.recovered][:limit],
-        "bad_files": [{"file": c.relpath, "status": c.status.value, "bytes": c.bytes_diff,
-                       "bits": c.bits_diff, "kinds": sorted({d.kind.value for d in c.diffs})}
-                      for c in result.bad_files[:limit]],
-        "files_corrupt": result.files_corrupt,
-        "files_missing": result.files_missing,
-        "files_unreadable": result.unreadable_files,
-        "bits_corrupt": result.bits_corrupt,
-    }
-
-
-def apply_cycle(state: DriveState, result: CycleResult, policy: FailurePolicy) -> list[Event]:
-    """Update ``state`` with a finished cycle and return the events it produced."""
-    if result.outcome is Outcome.ABORTED:
-        return []
-    events: list[Event] = []
-    drive, cycle = result.drive_id, result.cycle
-    state.cycles_done = cycle
-    state.bytes_written += result.write.bytes
-    state.host, state.port = result.host, result.port
-    if result.transient_errors:
-        events.append(Event(drive, cycle, EventType.TRANSIENT, "D3", {
-            "count": result.transient_errors,
-            "mismatches_cleared_on_reread": result.transient_mismatches,
-            "errors": [{"phase": e.phase, "kind": e.kind.value, "attempts": e.attempts,
-                        "detail": e.detail} for e in result.errors if e.recovered][:20],
-        }))
-    if result.outcome is Outcome.PASS:
-        slow = _track_throughput(state, result.workload, result.write.mbps, policy)
-        if slow is not None:
-            events.append(Event(drive, cycle, EventType.SLOW, "D1", slow))
-    else:
-        state.soft_failures.append(cycle)
-        events.append(Event(drive, cycle, EventType.CYCLE_FAILURE, FAILURE_CODES[result.outcome],
-                            failure_detail(result)))
-    return events
-
-
-def _track_throughput(state: DriveState, workload: str, mbps: float,
-                      policy: FailurePolicy) -> dict[str, Any] | None:
-    """Maintain the per-workload baseline and report the first D1 crossing."""
+def track_throughput(state: DriveState, workload: str, mbps: float,
+                     policy: FailurePolicy) -> dict[str, Any] | None:
+    """Maintain the per-workload baseline; return the details of the first D1 crossing."""
     samples = state.baseline_samples.setdefault(workload, [])
     if workload not in state.baseline_mbps:
         samples.append(mbps)
@@ -178,7 +149,7 @@ def _track_throughput(state: DriveState, workload: str, mbps: float,
         return None
     recent = state.recent_mbps.setdefault(workload, [])
     recent.append(mbps)
-    del recent[:-policy.slow_window]
+    del recent[: -policy.slow_window]
     baseline = state.baseline_mbps[workload]
     threshold = policy.slow_fraction * baseline
     if (len(recent) == policy.slow_window and max(recent) < threshold
@@ -189,7 +160,13 @@ def _track_throughput(state: DriveState, workload: str, mbps: float,
     return None
 
 
-def intermittent_limit_reached(state: DriveState, policy: FailurePolicy) -> bool:
-    """True when soft failures recur often enough to call the drive failed."""
+def limit_reached(state: DriveState, policy: FailurePolicy) -> bool:
+    """True when cycle failures recur often enough to end the drive's life."""
     first = state.cycles_done - policy.intermittent_window + 1
-    return sum(1 for c in state.soft_failures if c >= first) >= policy.intermittent_limit
+    return sum(1 for c in state.failure_cycles if c >= first) >= policy.intermittent_limit
+
+
+def life_record(cycle: int, code: str, when: str, dose: Dose, hours: float | None,
+                **extra: Any) -> dict[str, Any]:
+    return {"cycle": cycle, "code": code, "time": when, "hours_on_test": hours,
+            "dose": dose.to_json(), **extra}

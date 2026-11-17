@@ -1,178 +1,80 @@
-# RU_SYS_RELIABILITY_ENGI_Project_Flash_Drive
+# FlashRel Rig 2
 
-**flashrel** runs and analyzes an endurance test of USB flash drives under repeated
-copy → verify → delete cycling. It is the test software of our project for
-16:540:585 Systems Reliability Engineering I (Rutgers, Fall 2026); the test plan lives in
-the companion report repository (`Project/`).
+Unattended life testing of USB flash drives under repeated copy → verify → delete
+cycling, with a live web dashboard. Test software of Project 4 in 16:540:585 Systems
+Reliability Engineering I (Rutgers, Fall 2026), Group 4: Guoan Wang, Shangqing Wei,
+Mengtong Ai.
 
-- **Test harness**: drives many USB drives in parallel (one process per drive), fills
-  each drive to 90 % of its free space with files of a given size class, reads every
-  byte back *around the host's page cache*, deletes the files, and logs every cycle.
-  It detects data corruption, I/O errors, disconnects and hangs, read-only locks and
-  file-system faults, separates intermittent from hard failures, and helps tell port
-  faults from drive faults.
-- **Analysis**: life table, Kaplan–Meier, Weibull and lognormal MLE with censoring,
-  Weibayes bounds, Weibull regression (brand, capacity), a per-cycle proportional-hazards
-  model (file size), degradation pseudo-failure times, the mean cumulative function, and
-  an Excel workbook organized by brand, capacity and file size.
+Version 2 replaces the software of run 1 (`flashrel` 0.1, archived with its data in
+`../_archive/Project_code_v1_run1/`). It runs **run 2**: 20 drives on two 10-port hubs for
+120 hours on one Windows PC. The design is in [`docs/test_plan_run2.md`](docs/test_plan_run2.md),
+the runbook (Chinese) in [`docs/operator_guide_zh.md`](docs/operator_guide_zh.md).
 
-The harness needs only Python ≥ 3.10 and PyYAML, so it runs on Windows, macOS and Linux
-(including a Raspberry Pi). The analysis adds NumPy, SciPy, pandas, Matplotlib and openpyxl.
+## What it does
 
-The fall 2026 test ran eight drives on one Windows PC (six desktop ports and one USB-C
-dock with two ports) for 24 hours, from 23 October, 20:00, to 24 October, 20:00, after a
-pilot on two drives from 17:44 (eight hours later than planned; the durations were kept).
-Once started, the test runs unattended until the stop time;
-[`docs/operator_guide.md`](docs/operator_guide.md) is the runbook.
+* **Cycle** (as in run 1): fill 90 % of the free space with large, medium or small files
+  in a fixed rotation, flush every file, read every byte back around the host cache
+  (`FILE_FLAG_NO_BUFFERING`), compare it with regenerated reference data, delete.
+* **New in run 2**: checks of data at rest and of the exFAT file-system records every 10
+  minutes and at every phase boundary (identity + sentinel files read uncached; boot-region
+  and up-case checksums and root-directory entry sets read raw), so a failure is
+  time-stamped when it happens; exact dose counters (bytes, files created and deleted) in
+  every record; a recovery protocol with a software USB re-plug and a fresh-data check;
+  hub-event detection (F5); hang watchdog; resume after crashes and restarts; post-test
+  data-retention check, re-check on another port and port checks with spares.
+* **Dashboard** (http://127.0.0.1:8585): both hubs with a live card per port, KPIs, live
+  Kaplan–Meier curves and Weibull fits per group, hub bandwidth, events, a drawer per drive,
+  a setup wizard (host checks, self-test, guided enrollment that formats each stick) and
+  the post-test protocol.
+* **Data**: append-only CSV/JSON Lines per drive (`data/<campaign>/drives/<ID>/`), a life
+  table and an Excel workbook written at the stop, and a ZIP export.
 
-At the stop time every worker ends the cycle in progress at the next file boundary, does
-not count it, logs what it had shown, censors the drive and removes the partial payload,
-so the test ends at the stop time and not up to one cycle later.
+The rig uses the Python standard library only. On the test PC it runs on the official
+CPython *embeddable* distribution that ships inside the package, so nothing is installed.
 
-## Quick start
-
-```bash
-pip install -e ".[analysis]"          # add ,dev for the tests
-
-flashrel selftest                     # cache bypass + fault detection work on this computer?
-flashrel enroll configs/campaign.yaml --drive A8-03 --mount E:\   # once per drive (exFAT, empty)
-flashrel run configs/campaign.yaml --host W                       # all drives assigned to host W
-flashrel status configs/campaign.yaml                             # progress of every drive
-flashrel export configs/campaign.yaml --out data/fall2026.xlsx    # Excel workbook
-flashrel analyze configs/campaign.yaml --out reports/fall2026     # fits, tables, figures
-```
-
-On macOS use the volume path as the mount, e.g. `--mount /Volumes/A8-03`. `run` keeps the
-computer awake, staggers the workers by 30 s, prints a status table every minute and
-stops cleanly on Ctrl+C (the cycle in progress is discarded and repeated on restart).
-
-## How one cycle works
-
-1. **Locate** the drive by its identity file (`FLASHREL-ID.json`), never by drive letter.
-2. **Plan** a reproducible file set for cycle *k*: the workload (small / medium / large)
-   follows a fixed rotation; sizes are log-uniform; space is counted in whole clusters;
-   the set fills 90 % of the free space and never the last 64 MiB.
-3. **Write** (host → drive): each file is generated in memory and flushed with `fsync`
-   (`F_FULLFSYNC` on macOS). No source file ever touches the host disk.
-4. **Read back** (drive → host) bypassing the page cache (`FILE_FLAG_NO_BUFFERING` on
-   Windows; `msync(MS_INVALIDATE)` plus `F_NOCACHE` on macOS; `posix_fadvise` on Linux).
-   On macOS and Linux the block reads of every read-back are counted, so a read-back
-   served from memory is flagged in the log. Each file is compared byte for byte with
-   the regenerated reference. Every 1 MiB chunk carries a 32-byte header (file key,
-   cycle, file and chunk number), so a bad chunk is classified as bit errors, stale data,
-   misdirected data, an erased page, garbled or truncated.
-5. **Delete** the files and check that the free space comes back.
-
-Errors are retried twice (5 s, 10 s). Cleared errors are *transient* (D3); persistent
-ones end the cycle with a failure code, after which the worker waits for the drive to
-re-enumerate, checks for a read-only lock and runs a 64 MiB recovery check.
-
-| Code | Meaning | Code | Meaning |
-| --- | --- | --- | --- |
-| F1 | data corruption (incl. missing / truncated files) | F5 | port or host fault (not counted) |
-| F2 | unrecoverable I/O error | F6 | file-system fault (space, capacity) |
-| F3 | disconnect, or no I/O progress for 10 min (hang) | D1 | write throughput < 50 % of baseline |
-| F4 | read-only lock | D2 | intermittent failure (works after reset) |
-| | | D3 | transient error cleared by a retry |
-
-A drive's life ends (hard failure) when it does not pass the recovery protocol, locks
-read-only, changes capacity, or has 3 cycle failures within 10 cycles. A drive whose
-automatic recovery check fails stops until the post-test check after the stop time; see
-[`docs/operator_guide.md`](docs/operator_guide.md).
-
-## Repository layout
+## Layout
 
 ```text
-configs/            inventory.yaml (drives), campaign.yaml (the test), probes.example.yaml
-src/flashrel/       the package
-  config.py         campaign YAML -> validated dataclasses
-  inventory.py      drive groups and unit IDs
-  payload.py        deterministic file plans and self-describing chunks (SHAKE-128)
-  verify.py         byte-exact comparison and corruption diagnosis
-  cycle.py          one write / read-back / delete cycle with retries
-  failure.py        failure taxonomy, events, drive state, degradation rules
-  recorder.py       append-only CSV / JSON Lines logs, resumable state, drive locks
-  runner.py         per-drive worker, recovery protocol, supervisor, hang watchdog
-  intake.py         enrollment and capacity (counterfeit) screening
-  sensors.py        optional temperature sources (Arduino over serial)
-  system/           OS layer: cache-bypassing I/O, volume discovery, error mapping, sleep
-  analysis/         life data, nonparametric, parametric, regression, per-cycle hazard,
-                    degradation, attribution, planning, simulation, export, report
-  viz/              figure style, data plots, schematic diagrams
-scripts/            make_plan_figures.py, make_plan_tables.py, planning_assumptions.py (plan)
-                    post_test_check.py (every drive after the stop), make_results.py and
-                    results_figures.py (report figures, tables, key numbers),
-                    forensics.py (raw reads of the failed drives), slide_figures.py,
-                    make_presentation.py and check_deck.ps1 (the presentation)
-hardware/arduino/   optional DS18B20 temperature logger sketch
-docs/               runbook for the one-day test
-tests/              74 tests, including end-to-end cycles with injected faults
+config/campaign.toml     design of run 2 (groups, plan of hubs and ports, timers)
+src/flashrel/
+  config.py              TOML -> validated campaign; scaled copy for the simulator
+  payload.py, verify.py  reproducible test files with self-describing chunks; byte-exact check
+  cycle.py               one copy-verify-delete cycle (retries, stop checks, dose counters)
+  sentinel.py, exfat.py  data at rest and raw exFAT records: baseline at intake, periodic checks
+  failure.py             F1-F6 / D1-D3, drive state, first failure and end of life
+  worker.py              one process per drive: cycles, recovery protocol, censoring, live status
+  controller.py          supervisor: workers, watchdog, presence, hub events, jobs, snapshot
+  server.py, web/        local dashboard (vanilla HTML/CSS/JS, no internet needed)
+  intake.py              safe enrollment (format, identity, sentinel, baseline, USB location)
+  posttest.py            self-test, post-test check, re-check, port check, retire
+  hostops.py             Windows host checks and (undoable) fixes
+  analysis.py            Kaplan-Meier, Weibull MLE with censoring, Weibayes (pure Python)
+  export.py, xlsx.py     life table, Excel workbook, ZIP
+  platform/              windows (ctypes + PowerShell), posix (development), sim (simulated drives)
+launcher/                Start/Stop .bat files and README_先读我.txt of the package
+tools/                   make_assignment.py (randomized plan), build_package.py (Windows package)
+tests/                   39 tests: exFAT on run-1 dumps, engine faults, worker and controller end to end
+data/run1_fall2026/      the raw records of run 1 (for the pooled analysis)
 ```
-
-Each drive's logs live in `<data_dir>/<campaign>/<drive>/`: `cycles.csv` (one row per
-cycle, 36 fields), `events.jsonl`, `state.json` (resume point) and `intake.json`. The
-logs are the record of truth: a restarted worker reconciles `state.json` with them, so
-no cycle is counted twice.
-
-## Figures and tables of the test plan
-
-```bash
-python scripts/make_plan_figures.py --out ../Project/figures --formats pdf
-python scripts/make_plan_tables.py  --out ../Project/tables
-```
-
-The plan has four figures (rig, cycle, planning, schedule). They follow one visual system (`viz/style.py`): 7 pt sans-serif type, thin axes,
-brand as hue and capacity as lightness, colour-blind-safe, and exported at exactly the
-IEEE text width so LaTeX places them at 1:1 scale. The tables are generated from the same
-YAML files the harness runs on. Planning speeds are in `scripts/planning_assumptions.py`;
-replace them with the pilot's measurements and regenerate.
-
-`flashrel simulate configs/campaign.yaml --out data-sim` writes synthetic logs (made-up
-parameters, clearly not measurements) to rehearse the whole analysis before real data exist.
-
-## Results, final report and presentation
-
-After the stop (`C` stands for `configs/campaign.yaml`):
-
-```bash
-python scripts/post_test_check.py C --host W     # access every drive again (project 4.4)
-flashrel export C --out data/fall2026.xlsx
-flashrel analyze C --out reports/fall2026
-python scripts/forensics.py capture C --out data/fall2026/forensics   # failed drives, read-only
-python scripts/make_results.py C --out ../Project/results          # figures, tables, numbers
-python scripts/slide_figures.py C --out ../Project/results/slides  # half-size slide figures
-python scripts/make_presentation.py --template ../Proposal/ISE585_Project4_Proposal_v1.pptx \
-    --results ../Project/results --text ../Project/deck_text.json \
-    --hands data/fall2026/posttest-hands.json \
-    --out ../Proposal/ISE585_Project4_Presentation.pptx
-```
-
-The proposal talk (about 14 minutes, written to be read aloud, with the full script in the
-speaker notes) is built from the test plan on the same design:
-
-```bash
-python scripts/make_proposal_deck.py --template ../Proposal/ISE585_Project4_Proposal_v1.pptx \
-    --figures ../Project/figures/slides --qr ../Project/results/slides/qr_repo.png \
-    --out ../Proposal/ISE585_Project4_Proposal.pptx
-```
-
-`ISE585_Project4_Proposal_v1.pptx` is the first proposal deck. Both decks take their
-theme, layouts, and drive photos from it.
-
-`scripts/check_deck.ps1 -Deck <pptx>` then checks the deck layout through PowerPoint
-(read-only): text that overflows its box or overlaps other text or pictures, and anything
-past the margins.
-
-`make_results.py` writes the figures of the final report (`Project/final_report.tex`) at
-the IEEE column and page widths, the LaTeX tables, and `results.json` with every number
-the report and the slides quote. Its palette was checked with a colour-vision validator
-(brand is hue, capacity is lightness, file size is a one-hue ramp).
 
 ## Development
 
 ```bash
-pip install -e ".[analysis,dev]"
-pytest
+uv run --python 3.14 --with pytest python -m pytest            # all tests (about 2 min)
+uv run --python 3.14 --with pytest python -m pytest -m "not slow"
+PYTHONPATH=src python3 -m flashrel app --sim --data /tmp/frsim   # demo: 22 simulated drives
 ```
 
-Team: Guoan Wang, Shangqing Wei, Mengtong Ai.
+The simulator (`--sim`, `--sim-speed`, `--sim-hours`) runs the real controller, workers and
+dashboard on folders that stand in for drives, with made-up speeds and injected faults
+(metadata loss, missing files, corruption, read-only, disconnects, I/O errors). Its numbers
+are not measurements.
+
+## Build the Windows package
+
+```bash
+python3 tools/build_package.py          # downloads python-3.14.10-embed-{amd64,arm64}.zip once
+```
+
+Output: `dist/FlashRel-Rig/` and `dist/FlashRel-Rig-v2.0.0.zip`. Copy the folder to
+`C:\FlashRel-Rig` on the test PC and double-click `Start FlashRel.bat`.
