@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flashrel"
-version = "2.1.0"
+version = "2.1.1"
 description = "FlashRel Rig: unattended endurance (copy-verify-delete) life testing of USB flash drives on Windows, with a live web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
