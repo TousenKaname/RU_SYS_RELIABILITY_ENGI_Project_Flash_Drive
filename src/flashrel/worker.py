@@ -393,10 +393,13 @@ class Worker:
 
     def _scan(self) -> tuple[Volume | None, str]:
         """A look at every volume. Marked in live.json: a scan that hangs may be held up by
-        another stick, which the hang watchdog takes into account."""
+        another stick, which the hang watchdog takes into account. A scan that fails (a
+        volume vanishing under it) finds nothing this time."""
         self.live.update(scan=True)
         try:
             return locate(self.platform, self.drive_id, self.intake)
+        except OSError:
+            return None, ""
         finally:
             self.live.update(scan=False)
 
@@ -577,8 +580,9 @@ class Worker:
             if self._hub_event(lost_at):
                 if self._wait_hub(cycle, lost_at, "start of the cycle") != "lost":
                     return
-                reason = "did not come back after the hub event, although the hub's other drives did"
-                lost_at = None  # that hub event is settled: the recovery does not look at it again
+                self._failed_without_run(cycle, Outcome.DISCONNECTED, "did not come back after the hub event, "
+                                         "although the hub's other drives did", hub_settled=True)
+                return
             self._failed_without_run(cycle, Outcome.DISCONNECTED, reason, lost_at=lost_at)
             return
         if not vol.fs:  # found by its USB serial, but Windows cannot read a file system on it
@@ -649,7 +653,8 @@ class Worker:
                 self._log_interrupted(result, "hub event")
                 if self._wait_hub(cycle, lost_at, f"{result.phase} phase of cycle {cycle}") == "lost":
                     self._failed_without_run(cycle, Outcome.DISCONNECTED, "did not come back after the hub "
-                                             "event, although the hub's other drives did", phase=result.phase)
+                                             "event, although the hub's other drives did", phase=result.phase,
+                                             hub_settled=True)
                 return
             raw = self._unmounted()
             if raw is not None:  # still on the bus: its file system went, not the stick (F6)
@@ -736,9 +741,11 @@ class Worker:
                           dose=st.cum.to_json(), hours_on_test=self._hours(), fdw=round(self._fdw(), 4))
         self._save()
 
-    def _failure_detail(self, r: CycleResult, lost_at: datetime | None = None) -> dict[str, Any]:
+    def _failure_detail(self, r: CycleResult, lost_at: datetime | None = None,
+                        hub_settled: bool = False) -> dict[str, Any]:
         return {
             "lost_at": iso(lost_at) if lost_at else None,
+            "hub_settled": hub_settled,  # decided against the hub already: not looked at again
             "outcome": r.outcome.value, "workload": r.workload, "phase": r.phase,
             "errors": [e.__dict__ for e in r.errors if not e.recovered][:20],
             "bad_files": [{"file": c.relpath, "status": c.status.value, "bytes": c.bytes_diff,
@@ -751,7 +758,7 @@ class Worker:
 
     def _failed_without_run(self, cycle: int, outcome: Outcome, reason: str,
                             sentinel: dict[str, Any] | None = None, lost_at: datetime | None = None,
-                            phase: str = "start") -> None:
+                            phase: str = "start", hub_settled: bool = False) -> None:
         """A cycle that could not start or finish (drive missing, damage found at its start,
         not back after a hub event) is a failed cycle."""
         now = iso()
@@ -760,14 +767,15 @@ class Worker:
                         outcome=outcome, phase=phase, sentinel=sentinel)
         r.errors.append(ErrorRecord(phase, outcome.value, "", reason, 1, False))
         self._record_cycle(r)
-        self._recover(cycle, r.code, phase, self._failure_detail(r, lost_at=lost_at))
+        self._recover(cycle, r.code, phase, self._failure_detail(r, lost_at=lost_at, hub_settled=hub_settled))
 
     # -- recovery protocol ------------------------------------------------------------------
     def _recover(self, cycle: int, code: str, phase: str, detail: dict[str, Any]) -> None:
         st = self.state
         st.status = Status.RECOVERING.value
         st.pending_recovery = {"cycle": cycle, "code": code, "phase": phase,
-                               "detail": {"sentinel": detail.get("sentinel"), "lost_at": detail.get("lost_at")}}
+                               "detail": {"sentinel": detail.get("sentinel"), "lost_at": detail.get("lost_at"),
+                                          "hub_settled": bool(detail.get("hub_settled"))}}
         self._save()
         self.live.update(phase="recovering", context="recovery")
         try:
@@ -799,7 +807,7 @@ class Worker:
         vol, how = self._find(wait=policy.reconnect_timeout_s)
         if self.stop.is_set():
             return self._interrupted_recovery(cycle)
-        if vol is None:
+        if vol is None and not detail.get("hub_settled"):
             failed_at = _parse_time(detail.get("lost_at")) if code == "F3" else None
             when = failed_at or self._lost_at
             if self._hub_event(when):

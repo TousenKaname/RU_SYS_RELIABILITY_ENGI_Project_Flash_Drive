@@ -49,7 +49,7 @@ TRANSIENT_RATE = 1 / 4000  # per file read: an error that clears on retry (D3)
 
 
 def _atomic_json(path: str, data: dict) -> None:
-    tmp = f"{path}.{os.getpid()}.tmp"
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"  # threads of one process too
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1, sort_keys=True)
     for _ in range(50):
